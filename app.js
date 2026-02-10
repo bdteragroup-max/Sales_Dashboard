@@ -1,5 +1,5 @@
 const API_URL =
-  "https://script.google.com/macros/s/AKfycbyYC9MJHF_l5jN2fH7nLsgLTTCNj-Y-lXR62DW_60EpRgSJTfWJpsTzBXol25_gbMUN/exec";
+  "https://script.google.com/macros/s/AKfycbz12zRHIIEtm1T58s6x2RdhXP3-87cTORrPnU6syNoV-QNiol7Kc4TNWHUKajTixC-G/exec";
 
 const REFRESH_MS = 30000;
 const DEBOUNCE_DELAY = 350;
@@ -156,12 +156,14 @@ function onStartEndChange() {
 function buildQueryFromFilters() {
   const p = new URLSearchParams();
 
-  const days = el("f_days")?.value;
-  const start = el("f_start")?.value;
-  const end = el("f_end")?.value;
-  const team = el("f_team")?.value;
-  const person = el("f_person")?.value;
-  const group = el("f_group")?.value;
+  const days = document.getElementById("f_days")?.value;
+  const start = document.getElementById("f_start")?.value;
+  const end = document.getElementById("f_end")?.value;
+  const team = document.getElementById("f_team")?.value;
+  const person = document.getElementById("f_person")?.value;
+  const group = document.getElementById("f_group")?.value;
+
+  console.log("🔍 Current filters:", { days, start, end, team, person, group });
 
   if (start && end) {
     p.set("start", start);
@@ -175,6 +177,10 @@ function buildQueryFromFilters() {
   if (person) p.set("person", person);
   if (group) p.set("group", group);
 
+  // ✅ เพิ่ม timestamp เพื่อป้องกัน cache
+  p.set("_t", Date.now());
+
+  console.log("📤 Built query:", p.toString());
   return p;
 }
 
@@ -390,37 +396,53 @@ function validatePayload(payload) {
 
 /* ================= Load flow ================= */
 async function loadData(isAuto = false) {
+  console.group(`📥 loadData called (isAuto: ${isAuto})`);
+  console.log("Current state:", {
+    isLoading: state.isLoading,
+    isPicking: state.isPicking,
+    retryCount: state.retryCount,
+    autoTimer: state.autoTimer,
+  });
+
   // ✅ ป้องกันการโหลดซ้ำซ้อน
   if (isAuto && state.isPicking) {
-    console.log("⏸️ Skipping auto load (user is picking)");
+    console.log("⏸️ Skipping auto load (user is picking from dropdown)");
+    console.groupEnd();
     return;
   }
 
   if (state.isLoading) {
     console.log("⏸️ Skipping load (already loading)");
+    console.groupEnd();
     return;
   }
 
   state.isLoading = true;
   const startTime = Date.now();
 
-  setFilterStatus("กำลังโหลด…");
+  // ✅ อัปเดต UI status
+  setFilterStatus("กำลังโหลดข้อมูล...");
 
-  const btnApply = el("btnApply");
+  const btnApply = document.getElementById("btnApply");
   const originalText = btnApply?.textContent;
-  if (btnApply) btnApply.textContent = "Loading...";
+  if (btnApply) btnApply.textContent = "กำลังโหลด...";
 
   try {
+    // ✅ 1. สร้าง query parameters จาก filters
     const qs = buildQueryFromFilters();
     const url = API_URL + "?" + qs.toString();
-    console.log(
-      `📡 [${new Date().toLocaleTimeString()}] Loading from URL:`,
-      url,
-    );
 
-    // ✅ ใช้ timeout ที่แตกต่างกันสำหรับ auto load
+    console.log(`📡 [${new Date().toLocaleTimeString()}] Loading from URL:`, {
+      url: url.length > 100 ? url.substring(0, 100) + "..." : url,
+      params: qs.toString(),
+      isAuto: isAuto,
+    });
+
+    // ✅ 2. กำหนด timeout (auto load ใช้เวลาสั้นกว่า)
     const timeout = isAuto ? 15000 : 30000; // auto: 15s, manual: 30s
+    console.log(`⏱️ Timeout set to: ${timeout}ms`);
 
+    // ✅ 3. โหลดข้อมูลด้วย JSONP
     const payload = await loadJSONP(url, {
       timeout: timeout,
       isRetry: state.retryCount > 0,
@@ -429,49 +451,76 @@ async function loadData(isAuto = false) {
     const loadTime = Date.now() - startTime;
     console.log(`✅ Load successful in ${loadTime}ms`);
 
+    // ✅ 4. ตรวจสอบ payload
     if (!payload) {
       throw new Error("Empty response from server");
     }
 
-    console.log("✅ Payload received");
-    console.log("- Payload keys:", Object.keys(payload));
-    console.log("- Payload.ok:", payload.ok);
-    console.log("- has topByTeam:", !!payload.topByTeam);
+    console.log("📦 Payload received:", {
+      ok: payload.ok,
+      error: payload.error,
+      keys: Object.keys(payload),
+      dailyTrendLength: payload.dailyTrend?.length || 0,
+      summaryLength: payload.summary?.length || 0,
+      personTotalsLength: payload.personTotals?.length || 0,
+    });
 
-    // ✅ Validation
+    // ✅ 5. Validation
     const validation = validatePayload(payload);
     if (!validation.isValid) {
+      console.error("❌ Payload validation failed:", validation.errors);
       throw new Error(validation.errors[0] || "Invalid payload structure");
     }
 
-    // ✅ Reset state
+    // ✅ 6. Reset state
     state.lastPayload = payload;
     state.retryCount = 0;
 
-    // ✅ Update UI
+    // ✅ 7. Debug data structure (optional)
+    if (!isAuto) {
+      debugDataStructure(payload);
+      checkAPIData(payload);
+    }
+
+    // ✅ 8. Update UI
+    console.log("🔄 Updating UI...");
     updateAllUI(payload);
 
-    // ✅ Cache to localStorage
+    // ✅ 9. Cache to localStorage
     try {
       const cacheData = {
         data: payload,
         timestamp: Date.now(),
         filters: qs.toString(),
         loadTime: loadTime,
+        version: "1.0",
       };
       localStorage.setItem("lastDashboardPayload", JSON.stringify(cacheData));
-      console.log("💾 Cached to localStorage");
+      console.log("💾 Cached to localStorage:", {
+        size: JSON.stringify(cacheData).length,
+        timestamp: new Date(cacheData.timestamp).toLocaleTimeString(),
+      });
     } catch (e) {
       console.warn("⚠️ Could not save to localStorage:", e.message);
     }
 
-    setFilterStatus("พร้อมใช้งาน");
+    // ✅ 10. Update status
+    setFilterStatus(`โหลดสำเร็จ (${loadTime}ms)`);
+
     if (!isAuto) {
       showToast(`โหลดข้อมูลสำเร็จ (${loadTime}ms)`, "success");
     }
+
+    console.log(`✅ Load completed successfully in ${loadTime}ms`);
+    console.groupEnd();
   } catch (err) {
     const errorTime = Date.now() - startTime;
-    console.error(`❌ API load error (${errorTime}ms):`, err);
+    console.error(`❌ API load error (${errorTime}ms):`, {
+      message: err.message,
+      stack: err.stack,
+      isAuto: isAuto,
+      retryCount: state.retryCount,
+    });
 
     let errorMessage = err.message || "Unknown error";
     let userMessage = errorMessage;
@@ -485,6 +534,8 @@ async function loadData(isAuto = false) {
       userMessage = "เซิร์ฟเวอร์ไม่ตอบสนอง";
     } else if (errorMessage.includes("Network Error")) {
       userMessage = "ข้อผิดพลาดเครือข่าย";
+    } else if (errorMessage.includes("CORS")) {
+      userMessage = "ปัญหาเกี่ยวกับความปลอดภัยของเบราว์เซอร์";
     }
 
     // ✅ Update UI error state
@@ -492,6 +543,7 @@ async function loadData(isAuto = false) {
     setFilterStatus("โหลดไม่สำเร็จ", true);
 
     // ✅ ลองใช้ cached data ถ้ามี
+    let cachedDataUsed = false;
     try {
       const cached = localStorage.getItem("lastDashboardPayload");
       if (cached) {
@@ -499,25 +551,49 @@ async function loadData(isAuto = false) {
         const cacheAge = Date.now() - cachedData.timestamp;
         const cacheValid = cacheAge < 3600000; // 1 ชั่วโมง
 
+        console.log("🔍 Checking cache:", {
+          age: cacheAge,
+          valid: cacheValid,
+          filters: cachedData.filters,
+        });
+
         if (cacheValid) {
           console.log(
             "🔄 Using cached data from localStorage (age:",
             Math.round(cacheAge / 1000),
             "s)",
           );
-          showToast("ใช้ข้อมูลจากแคช (ออฟไลน์)", "info");
+
+          showToast(
+            `ใช้ข้อมูลจากแคช (อายุ ${Math.round(cacheAge / 1000)} วินาที)`,
+            "info",
+          );
           updateAllUI(cachedData.data);
           setFilterStatus("ใช้ข้อมูลแคช");
           state.retryCount = 0;
+          cachedDataUsed = true;
+
+          console.log("✅ Successfully loaded from cache");
+          console.groupEnd();
+
+          // อัปเดตปุ่ม
+          if (btnApply) btnApply.textContent = originalText;
+          state.isLoading = false;
           return;
+        } else {
+          console.log(
+            "⚠️ Cache expired (age:",
+            Math.round(cacheAge / 1000),
+            "s)",
+          );
         }
       }
     } catch (cacheErr) {
       console.warn("Cache fallback failed:", cacheErr);
     }
 
-    // ✅ Retry logic (เฉพาะสำหรับ manual load หรือ retry count น้อย)
-    if (!isAuto && state.retryCount < MAX_RETRIES) {
+    // ✅ Retry logic (เฉพาะ manual load และยังไม่เกิน retry limit)
+    if (!isAuto && !cachedDataUsed && state.retryCount < MAX_RETRIES) {
       state.retryCount++;
       const retryDelay = RETRY_DELAY * Math.pow(1.5, state.retryCount - 1);
 
@@ -534,27 +610,80 @@ async function loadData(isAuto = false) {
         console.log(`🔄 Executing retry ${state.retryCount}/${MAX_RETRIES}`);
         loadData(true); // ใช้ isAuto = true สำหรับ retry
       }, retryDelay);
+
+      console.groupEnd();
+      return;
     } else {
       // ✅ หมด retry หรือเป็น auto load
       if (state.retryCount >= MAX_RETRIES) {
+        console.log(`🛑 Max retries reached (${MAX_RETRIES})`);
         showToast("ลองใหม่หลายครั้งแล้ว ไม่สามารถเชื่อมต่อได้", "error");
         state.retryCount = 0;
       }
 
-      // ✅ แสดง fallback UI
-      if (!isAuto) {
+      // ✅ แสดง fallback UI ถ้าไม่ได้ใช้แคช
+      if (!isAuto && !cachedDataUsed) {
+        console.log("🔄 Showing fallback UI");
         showFallbackUI();
       }
     }
+
+    console.groupEnd();
   } finally {
+    // ✅ Cleanup
     state.isLoading = false;
+
+    // อัปเดตปุ่มกลับสู่สถานะปกติ
     if (btnApply) btnApply.textContent = originalText;
+
+    // ล้าง auto timer
+    if (state.autoTimer) {
+      clearTimeout(state.autoTimer);
+      state.autoTimer = null;
+    }
+
+    console.log("🧹 Cleanup completed, isLoading:", state.isLoading);
   }
 }
 
 // ✅ Fallback UI สำหรับเมื่อ API ไม่สามารถติดต่อได้
 function showFallbackUI() {
   console.log("🔄 Showing fallback UI");
+
+  const fallbackHTML = `
+    <div class="offline-message">
+      <div style="color: #fbbf24; font-size: 32px; margin-bottom: 15px; text-align: center;">
+        ⚠️
+      </div>
+      <div style="text-align: center; margin-bottom: 20px;">
+        <div style="color: #94a3b8; font-size: 16px; margin-bottom: 10px;">
+          ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้
+        </div>
+        <div style="font-size: 13px; color: #64748b; line-height: 1.5;">
+          กรุณาตรวจสอบ:
+          <ul style="text-align: left; margin: 10px 0; padding-left: 20px;">
+            <li>การเชื่อมต่ออินเทอร์เน็ต</li>
+            <li>URL ของ API: ${API_URL.substring(0, 50)}...</li>
+            <li>สถานะเซิร์ฟเวอร์</li>
+          </ul>
+        </div>
+      </div>
+      <div style="text-align: center;">
+        <button onclick="location.reload()" 
+                style="padding: 10px 20px; background: #3b82f6; color: white; 
+                       border: none; border-radius: 6px; cursor: pointer; 
+                       font-weight: 500; margin-right: 10px;">
+          โหลดใหม่
+        </button>
+        <button onclick="loadData(false)" 
+                style="padding: 10px 20px; background: #64748b; color: white; 
+                       border: none; border-radius: 6px; cursor: pointer; 
+                       font-weight: 500;">
+          ลองอีกครั้ง
+        </button>
+      </div>
+    </div>
+  `;
 
   // แสดงข้อความใน containers หลัก
   const mainContainers = [
@@ -564,27 +693,29 @@ function showFallbackUI() {
     "conversionContainer",
     "areaPerformanceContainer",
     "productPerformanceContainer",
+    "monthlyComparisonContainer",
   ];
 
   mainContainers.forEach((containerId) => {
-    const container = el(containerId);
+    const container = document.getElementById(containerId);
     if (container) {
-      container.innerHTML = `
-        <div class="offline-message">
-          <div style="color: #fbbf24; font-size: 24px; margin-bottom: 10px;">⚠️</div>
-          <div style="color: #94a3b8; margin-bottom: 5px;">ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้</div>
-          <div style="font-size: 12px; color: #64748b;">
-            กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต
-          </div>
-          <button onclick="location.reload()" style="margin-top: 10px; padding: 6px 12px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer;">
-            โหลดใหม่
-          </button>
-        </div>
-      `;
+      container.innerHTML = fallbackHTML;
     }
   });
 
-  // ซ่อน loading indicators
+  // แสดงใน chart area
+  const chartStatus = document.getElementById("chartStatus");
+  if (chartStatus) {
+    chartStatus.innerHTML = `
+      <div style="text-align: center; padding: 30px;">
+        <div style="color: #f59e0b; margin-bottom: 10px;">⚠️ ไม่สามารถโหลดข้อมูลได้</div>
+        <div style="font-size: 13px; color: #94a3b8;">
+          กำลังใช้ข้อมูลแคชหรือลองเชื่อมต่อใหม่...
+        </div>
+      </div>
+    `;
+  }
+
   setFilterStatus("เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ", true);
 }
 
@@ -707,60 +838,6 @@ async function loadJSONP(url) {
 
     document.body.appendChild(script);
   });
-}
-
-async function checkAPIStatus() {
-  try {
-    const testUrl = API_URL + "?days=1";
-    console.log("🔍 Testing API URL:", testUrl);
-
-    // ✅ ลด timeout สำหรับ status check
-    const TIMEOUT_MS = 10000; // ลดจาก 45000 เป็น 10000 ms
-
-    // ✅ ใช้ Promise.race สำหรับ timeout ที่เร็วกว่า
-    const fetchPromise = loadJSONP(testUrl);
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(
-        () => reject(new Error(`Status check timeout (${TIMEOUT_MS}ms)`)),
-        TIMEOUT_MS,
-      );
-    });
-
-    const payload = await Promise.race([fetchPromise, timeoutPromise]);
-
-    if (!payload) {
-      console.warn("⚠️ API returned empty response");
-      return false;
-    }
-
-    if (!payload.ok) {
-      console.warn(
-        "⚠️ API response not ok:",
-        payload.error || "No error message",
-      );
-      return false;
-    }
-
-    console.log("✅ API status check passed");
-    return true;
-  } catch (err) {
-    console.warn("⚠️ API status check failed:", err.message);
-
-    // ✅ แสดงคำแนะนำสำหรับ debugging
-    if (err.message.includes("timeout")) {
-      console.log("💡 Tips for timeout issue:");
-      console.log(
-        "1. ตรวจสอบว่า Google Apps Script Web App ถูก deploy เป็นเวอร์ชันล่าสุด",
-      );
-      console.log("2. ตรวจสอบว่า Web App ตั้งค่าให้ 'Anyone' สามารถเข้าถึงได้");
-      console.log("3. ตรวจสอบ URL ใน API_URL ว่าถูกต้อง: " + API_URL);
-      console.log("4. ตรวจสอบ internet connection");
-    } else if (err.message.includes("Failed to load script")) {
-      console.log("💡 Could be CORS issue or incorrect URL");
-    }
-
-    return false;
-  }
 }
 
 /* ================= Picking lock + filter events ================= */
@@ -985,11 +1062,18 @@ function createPaginationContainer(id) {
 }
 
 // ---------------- Target Achievement ----------------
+// ✅ Enhanced Target vs Actual Rendering
+// แทนที่ฟังก์ชัน renderTarget เดิม (ประมาณบรรทัด 1065-1100)
+
 function renderTarget(payload) {
-  const targetData = payload?.target || payload?.goal || {};
+  const targetData = payload?.target ?? payload?.monthlyTarget ?? {};
 
   const actual = Number(
-    targetData.actual ?? targetData.current ?? targetData.sales ?? 0,
+    targetData.actual ??
+      targetData.sales ??
+      payload?.summary?.totalSales ??
+      payload?.summaryTotals?.sales ??
+      0,
   );
   const goal = Number(
     targetData.goal ?? targetData.target ?? targetData.monthlyTarget ?? 0,
@@ -1000,35 +1084,81 @@ function renderTarget(payload) {
     setText("target_actual", "ไม่มีข้อมูล");
     setText("target_goal", "ไม่มีข้อมูล");
     setText("target_pct", "0%");
+    setText("target_badge", "0%");
     const fill = el("target_fill");
     if (fill) fill.style.width = "0%";
+    const status = el("target_status");
+    if (status) status.innerHTML = "";
     return;
   }
 
   const pct = goal > 0 ? (actual / goal) * 100 : 0;
 
+  // อัปเดตค่า
   setText("target_actual", fmt.format(actual) + " ฿");
   setText("target_goal", fmt.format(goal) + " ฿");
   setText("target_pct", pct.toFixed(1) + "%");
 
+  // อัปเดต badge
+  const badge = el("target_badge");
+  if (badge) {
+    badge.textContent = pct.toFixed(1) + "%";
+
+    // เปลี่ยนสีตามเปอร์เซ็นต์
+    badge.className = "target-badge";
+    if (pct >= 100) {
+      badge.classList.add("excellent");
+    } else if (pct >= 80) {
+      badge.classList.add("good");
+    } else if (pct >= 50) {
+      badge.classList.add("warning");
+    } else {
+      badge.classList.add("danger");
+    }
+  }
+
+  // อัปเดต progress bar
   const fill = el("target_fill");
   if (fill) {
     fill.style.width = `${Math.min(pct, 100)}%`;
 
     // โทนสีตาม % เป้า
     if (pct >= 100) {
-      fill.style.background =
-        "linear-gradient(90deg, var(--good), rgba(34,197,94,.7))";
-    } else if (pct >= 75) {
-      fill.style.background =
-        "linear-gradient(90deg, var(--brand), rgba(56,189,248,.7))";
+      fill.style.background = "linear-gradient(90deg, #10b981, #059669)";
+    } else if (pct >= 80) {
+      fill.style.background = "linear-gradient(90deg, #3b82f6, #2563eb)";
     } else if (pct >= 50) {
-      fill.style.background =
-        "linear-gradient(90deg, var(--warn), rgba(245,158,11,.7))";
+      fill.style.background = "linear-gradient(90deg, #f59e0b, #d97706)";
     } else {
-      fill.style.background =
-        "linear-gradient(90deg, #ef4444, rgba(239,68,68,.7))";
+      fill.style.background = "linear-gradient(90deg, #ef4444, #dc2626)";
     }
+  }
+
+  // อัปเดต status message
+  const status = el("target_status");
+  if (status) {
+    let message = "";
+    let statusClass = "";
+
+    const remaining = goal - actual;
+    const remainingFormatted = fmt.format(Math.abs(remaining));
+
+    if (pct >= 100) {
+      message = `🎉 ยอดเยี่ยม! ทำได้เกินเป้า ${remainingFormatted} ฿ (${(pct - 100).toFixed(1)}%)`;
+      statusClass = "excellent";
+    } else if (pct >= 80) {
+      message = `👍 ดีมาก! ใกล้เป้าแล้ว เหลืออีก ${remainingFormatted} ฿ (${(100 - pct).toFixed(1)}%)`;
+      statusClass = "good";
+    } else if (pct >= 50) {
+      message = `💪 ต้องเร่งสปีด! เหลืออีก ${remainingFormatted} ฿ (${(100 - pct).toFixed(1)}%)`;
+      statusClass = "warning";
+    } else {
+      message = `⚠️ ต้องเร่งมากๆ! เหลืออีก ${remainingFormatted} ฿ (${(100 - pct).toFixed(1)}%)`;
+      statusClass = "danger";
+    }
+
+    status.textContent = message;
+    status.className = "target-status " + statusClass;
   }
 }
 
@@ -1333,32 +1463,100 @@ function renderProductMix(payload) {
   });
 }
 
+// ✅ Enhanced Customer Insight Rendering
+// แทนที่ฟังก์ชัน renderCustomerInsight ในไฟล์ app.js
+
 function renderCustomerInsight(payload) {
-  const body = document.getElementById("customerInsightBody");
-  if (!body) return;
+  const container = document.getElementById("customerInsightBody");
+  if (!container) return;
 
   const items = payload?.customerInsight?.items;
 
   if (!Array.isArray(items) || items.length === 0) {
-    body.innerHTML = `<tr><td colspan="3" class="muted">ไม่มีข้อมูล</td></tr>`;
+    container.innerHTML = `<tr><td colspan="5" class="muted">ไม่มีข้อมูล</td></tr>`;
     return;
   }
 
-  body.innerHTML = items
-    .map((it) => {
-      const label = escapeHtml(it?.label || it?.type || it?.name || "ไม่ระบุ");
-      const sales = n0(it?.sales ?? it?.value); // รองรับทั้ง sales และ value
-      const pct = n0(it?.pct ?? it?.percent); // รองรับทั้ง pct และ percent
+  // คำนวณยอดรวม
+  const totalSales = items.reduce(
+    (sum, item) => sum + (item.sales || item.value || 0),
+    0,
+  );
+  const totalCount = items.reduce((sum, item) => sum + (item.count || 0), 0);
+
+  // สร้าง HTML สำหรับแต่ละแถว
+  const rows = items
+    .map((item, index) => {
+      const label = item.label || item.type || item.name || "ไม่ระบุ";
+      const count = item.count || 0;
+      const sales = item.sales || item.value || 0;
+      const pct =
+        item.pct ||
+        item.percent ||
+        (totalSales > 0 ? (sales / totalSales) * 100 : 0);
+
+      // กำหนดสีตามอันดับ
+      const rankColors = [
+        { bg: "#f59e0b", text: "#fff" }, // 1 - เหลือง
+        { bg: "#94a3b8", text: "#fff" }, // 2 - เทา
+        { bg: "#fb923c", text: "#fff" }, // 3 - ส้ม
+        { bg: "#3b82f6", text: "#fff" }, // 4 - น้ำเงิน
+      ];
+      const rankColor = rankColors[index] || { bg: "#64748b", text: "#fff" };
+
+      // กำหนดสี badge % (เขียวถ้า > 30%, แดงถ้า < 15%)
+      let badgeClass = "badge-neutral";
+      if (pct >= 30) badgeClass = "badge-success";
+      else if (pct < 15) badgeClass = "badge-danger";
 
       return `
-        <tr>
-          <td>${label}</td>
-          <td class="num">${fmt.format(sales)} ฿</td>
-          <td class="num">${pct.toFixed(1)}%</td>
-        </tr>
-      `;
+      <tr class="insight-row">
+        <td class="insight-category">
+          <div class="category-wrapper">
+            <div class="rank-badge" style="background: ${rankColor.bg}; color: ${rankColor.text};">
+              ${index + 1}
+            </div>
+            <div class="category-info">
+              <div class="category-name">${escapeHtml(label)}</div>
+              <div class="category-progress">
+                <div class="progress-bar-bg">
+                  <div class="progress-bar-fill" style="width: ${Math.min(pct, 100)}%"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </td>
+        <td class="num insight-count">${count}</td>
+        <td class="num insight-sales">
+          ${(sales / 1000000).toFixed(2)} B
+        </td>
+        <td class="num insight-percent">
+          <span class="percent-badge ${badgeClass}">
+            ${pct.toFixed(1)}%
+          </span>
+        </td>
+        <td class="num insight-total">
+          ${(sales / 1000).toFixed(3)} B
+        </td>
+      </tr>
+    `;
     })
     .join("");
+
+  // แถวสรุป - ใช้รูปแบบเดียวกับแถวข้อมูล
+  const summaryRow = `
+    <tr class="insight-summary">
+      <td class="summary-label">
+        <strong>รวมทั้งหมด (2026)</strong>
+      </td>
+      <td class="num"><strong>${totalCount}</strong></td>
+      <td class="num"><strong>${(totalSales / 1000000).toFixed(2)} B</strong></td>
+      <td class="num"><strong>100%</strong></td>
+      <td class="num"><strong>${(totalSales / 1000).toFixed(3)} B</strong></td>
+    </tr>
+  `;
+
+  container.innerHTML = rows + summaryRow;
 }
 
 // ---------------- 🆕 Area Performance ----------------
@@ -1527,94 +1725,126 @@ function renderLostDeals(payload) {
   lostDealChart.update();
 }
 
-function renderCallVisitYearly(data) {
-  const cv = data?.callVisitYearly || {};
+function renderCallVisitYearly(payload) {
+  console.log("🔄 renderCallVisitYearly called");
+  console.log("Call & Visit payload:", payload?.callVisitYearly);
+
+  const cv = payload?.callVisitYearly || {};
   const yearNow = new Date().getFullYear();
 
-  // ✅ โทร/เข้าพบ (คงเดิม แต่กัน type)
-  setText("cv_total_calls", Number(cv.totalCalls ?? 0) || 0);
-  setText("cv_total_visits", Number(cv.totalVisits ?? 0) || 0);
+  // ✅ 1. ตรวจสอบ element IDs
+  const elementIds = [
+    "cv_total_calls",
+    "cv_total_visits",
+    "cv_total_presented",
+    "cv_total_quoted",
+    "cv_total_closed",
+  ];
 
-  // ✅ ดึงรายการรายปี (รองรับทั้ง array และ object-map)
-  const src = cv.byYear || cv.yearly || cv.years || cv.items || cv.data || null;
+  console.log(
+    "Checking elements:",
+    elementIds.map((id) => ({
+      id,
+      exists: !!document.getElementById(id),
+    })),
+  );
 
-  // helper: แปลงค่าเป็นตัวเลขเสมอ (รับ "1,234" ได้)
-  const toNumber = (v, fallback = 0) => {
-    if (v === undefined || v === null || v === "") return fallback;
-    if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
-    const n = Number(String(v).replace(/,/g, "").trim());
-    return Number.isFinite(n) ? n : fallback;
-  };
+  // ✅ 2. แสดงข้อมูลพื้นฐาน (ป้องกัน undefined)
+  setText("cv_total_calls", fmt.format(Number(cv.totalCalls || cv.calls || 0)));
+  setText(
+    "cv_total_visits",
+    fmt.format(Number(cv.totalVisits || cv.visits || 0)),
+  );
 
-  // helper: เลือกค่าจาก keys แบบปลอดภัย + toNumber
-  const pickNum = (row, keys, fallback = 0) => {
-    if (row && typeof row === "object") {
-      for (const k of keys) {
-        if (row[k] !== undefined && row[k] !== null && row[k] !== "") {
-          return toNumber(row[k], fallback);
-        }
-      }
-    }
-    return toNumber(fallback, 0);
-  };
+  // ✅ 3. ดึงข้อมูลรายปี (รองรับหลายรูปแบบ)
+  let yearlyData = null;
+  let selectedYear = yearNow;
 
-  // ✅ หา yearRow
-  let yearRow = null;
-
-  if (Array.isArray(src)) {
-    // หา row ของปีปัจจุบันก่อน
-    yearRow =
-      src.find((r) => Number(r?.year ?? r?.YYYY ?? r?.y) === yearNow) || null;
-
-    // ถ้าไม่เจอ: เลือกปีล่าสุดที่มีใน array
-    if (!yearRow) {
-      const rowsWithYear = src
-        .map((r) => ({ r, y: Number(r?.year ?? r?.YYYY ?? r?.y) }))
-        .filter((x) => Number.isFinite(x.y));
-
-      if (rowsWithYear.length) {
-        const latest = rowsWithYear.reduce((a, b) => (b.y > a.y ? b : a));
-        yearRow = latest.r || null;
-      }
-    }
-  } else if (src && typeof src === "object") {
-    // แบบ { "2026": {...}, "2025": {...} }
-    yearRow = src[String(yearNow)] || src[yearNow] || null;
-
-    // ถ้าไม่เจอ: หาปีล่าสุดจาก key
-    if (!yearRow) {
-      const years = Object.keys(src)
-        .map((k) => Number(k))
-        .filter((y) => Number.isFinite(y));
-      if (years.length) {
-        const latestYear = Math.max(...years);
-        yearRow = src[String(latestYear)] || src[latestYear] || null;
-        if (yearRow && typeof yearRow === "object") yearRow.year = latestYear;
-      }
-    } else {
-      if (yearRow && typeof yearRow === "object") yearRow.year = yearNow;
-    }
+  // รูปแบบที่ 1: Array of objects
+  if (Array.isArray(cv.yearly) && cv.yearly.length > 0) {
+    yearlyData = cv.yearly.find((item) => item.year == yearNow) || cv.yearly[0]; // fallback to first item
+    console.log("Found yearly array data:", yearlyData);
+  }
+  // รูปแบบที่ 2: Object with year keys
+  else if (cv.yearly && typeof cv.yearly === "object") {
+    yearlyData = cv.yearly[yearNow] || cv.yearly[Object.keys(cv.yearly)[0]];
+    console.log("Found yearly object data:", yearlyData);
+  }
+  // รูปแบบที่ 3: Direct properties
+  else if (cv.totalPresented || cv.totalQuoted || cv.totalClosed) {
+    yearlyData = cv;
+    console.log("Using direct properties data:", yearlyData);
+  }
+  // รูปแบบที่ 4: byYear
+  else if (cv.byYear && Array.isArray(cv.byYear)) {
+    yearlyData = cv.byYear.find((item) => item.year == yearNow) || cv.byYear[0];
+    console.log("Found byYear data:", yearlyData);
   }
 
-  const presented = pickNum(
-    yearRow,
-    ["presented", "totalPresented", "present", "L", "l"],
-    cv.totalPresented ?? 0,
-  );
-  const quoted = pickNum(
-    yearRow,
-    ["quoted", "totalQuoted", "quote", "M", "m"],
-    cv.totalQuoted ?? 0,
-  );
-  const closed = pickNum(
-    yearRow,
-    ["closed", "totalClosed", "close", "N", "n"],
-    cv.totalClosed ?? 0,
-  );
+  // ✅ 4. แสดงข้อมูล (ใช้ helper function เพื่อความปลอดภัย)
+  const presented = getNumberValue(yearlyData, [
+    "presented",
+    "totalPresented",
+    "present",
+    "L",
+  ]);
+  const quoted = getNumberValue(yearlyData, [
+    "quoted",
+    "totalQuoted",
+    "quote",
+    "M",
+  ]);
+  const closed = getNumberValue(yearlyData, [
+    "closed",
+    "totalClosed",
+    "close",
+    "N",
+  ]);
 
-  setText("cv_total_presented", presented);
-  setText("cv_total_quoted", quoted);
-  setText("cv_total_closed", closed);
+  console.log("Final values:", { presented, quoted, closed });
+
+  // ✅ 5. อัปเดต UI
+  setText("cv_total_presented", fmt.format(presented));
+  setText("cv_total_quoted", fmt.format(quoted));
+  setText("cv_total_closed", fmt.format(closed));
+
+  // ✅ 6. ถ้าไม่มีข้อมูลให้แสดง fallback
+  if (presented === 0 && quoted === 0 && closed === 0) {
+    console.warn("⚠️ No call & visit yearly data found");
+
+    // แสดงข้อความใน container
+    const container =
+      document.querySelector(".call-visit-yearly") ||
+      document.getElementById("callVisitContainer");
+    if (container) {
+      const message = document.createElement("div");
+      message.className = "no-data-message";
+      message.innerHTML = `
+        <div style="text-align: center; padding: 20px; color: #94a3b8;">
+          <div>📊 ไม่มีข้อมูล Call & Visit Yearly</div>
+          <small>ตรวจสอบโครงสร้างข้อมูลจาก API</small>
+        </div>
+      `;
+
+      // เพิ่มถ้ายังไม่มี
+      if (!container.querySelector(".no-data-message")) {
+        container.appendChild(message);
+      }
+    }
+  }
+}
+
+// ✅ Helper function: ดึงค่าตัวเลขจาก object
+function getNumberValue(obj, keys) {
+  if (!obj) return 0;
+
+  for (const key of keys) {
+    if (obj[key] !== undefined && obj[key] !== null && obj[key] !== "") {
+      const num = Number(String(obj[key]).replace(/,/g, "").trim());
+      return Number.isFinite(num) ? num : 0;
+    }
+  }
+  return 0;
 }
 
 /* ================= Area Performance Heatmap ================= */
@@ -2181,143 +2411,390 @@ function setupHeatmapTooltips() {
 }
 
 function updateAllUI(payload) {
-  console.log("🔄 updateAllUI called with payload");
+  console.group("🔄 updateAllUI called");
   console.log("Payload keys:", Object.keys(payload));
-  console.log("Payload has topByTeam:", !!payload.topByTeam);
+
+  // ✅ Debug: ตรวจสอบข้อมูลสำคัญ
+  console.log("🔍 Data check:", {
+    hasDailyTrend: !!payload.dailyTrend,
+    dailyTrendLength: payload.dailyTrend?.length || 0,
+    hasSummary: !!payload.summary,
+    summaryLength: payload.summary?.length || 0,
+    hasPersonTotals: !!payload.personTotals,
+    personTotalsLength: payload.personTotals?.length || 0,
+    hasCallVisitYearly: !!payload.callVisitYearly,
+    hasCustomerSegmentation: !!payload.customerSegmentation,
+    hasProductMix: !!payload.productMix,
+    hasTopByTeam: !!payload.topByTeam,
+  });
 
   if (!payload) {
     console.error("❌ Payload is null or undefined");
+    showToast("ไม่มีข้อมูลจากเซิร์ฟเวอร์", "error");
     return;
   }
 
+  // ✅ ตั้งค่า state
   state.lastPayload = payload;
 
-  // ✅ 1. อัปเดตข้อมูลพื้นฐาน (ฟังก์ชันที่ไม่ต้องการ container)
-  updateRangeText(payload);
-  setAvailable_PATCH(payload);
-  setKPI(payload);
-  setTrend(payload);
+  // ✅ 1. อัปเดตข้อมูลพื้นฐาน (ไม่ต้องการ container)
+  try {
+    updateRangeText(payload);
+    setAvailable_PATCH(payload);
+    setKPI(payload);
 
-  // ✅ 2. อัปเดตตารางข้อมูล
-  if (typeof renderPersonTotalsWithPagination === "function") {
-    renderPersonTotalsWithPagination(payload, 1, 20);
-  } else if (typeof renderPersonTotals === "function") {
-    renderPersonTotals(payload);
+    // ✅ 2. อัปเดต chart
+    if (chart) {
+      console.log("📈 Updating chart...");
+      setTrend(payload);
+    } else {
+      console.warn("⚠️ Chart not initialized, calling initChart...");
+      initChart();
+      if (chart) setTrend(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error updating basic data:", error);
   }
 
-  if (typeof setSummary === "function") {
-    setSummary(payload);
+  // ✅ 3. อัปเดตตารางข้อมูล (ใช้ safeRender เพื่อป้องกัน error)
+  console.log("📊 Rendering tables...");
+
+  // 3.1 Person Totals with Pagination
+  try {
+    if (typeof renderPersonTotalsWithPagination === "function") {
+      console.log("👥 Rendering person totals...");
+      renderPersonTotalsWithPagination(payload, 1, 20);
+    } else if (typeof renderPersonTotals === "function") {
+      console.log("👥 Rendering person totals (fallback)...");
+      renderPersonTotals(payload);
+    } else {
+      console.warn("⚠️ No person totals function found");
+    }
+  } catch (error) {
+    console.error("❌ Error rendering person totals:", error);
   }
 
-  // ✅ 3. ⭐⭐ IMPORTANT FIX: Product Mix, Target, Funnel - ใช้โค้ดเดิมของคุณ ⭐⭐
-  // 3.1 Product Mix Chart (ใช้โค้ดเดิมของคุณ)
-  if (typeof renderProductMix === "function") {
-    try {
-      console.log("🔄 Rendering Product Mix");
+  // 3.2 Summary Table
+  try {
+    if (typeof setSummary === "function") {
+      console.log("🏢 Rendering summary...");
+      setSummary(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error rendering summary:", error);
+  }
+
+  // ✅ 4. อัปเดต Charts และ Metrics (สำคัญ!)
+  console.log("📈 Rendering charts and metrics...");
+
+  // 4.1 Product Mix Chart
+  try {
+    if (typeof renderProductMix === "function" && payload.productMix) {
+      console.log("📦 Rendering product mix...");
       renderProductMix(payload);
-    } catch (error) {
-      console.error("❌ Error in renderProductMix:", error);
-      // Fallback ถ้าไม่สำเร็จ
-      const productContainer =
-        document.getElementById("productChart")?.parentElement;
-      if (productContainer) {
-        productContainer.innerHTML =
-          '<div class="muted">ไม่มีข้อมูลสินค้า</div>';
+    } else {
+      console.log("ℹ️ No product mix data or function");
+    }
+  } catch (error) {
+    console.error("❌ Error in renderProductMix:", error);
+    const productContainer =
+      document.getElementById("productChart")?.parentElement;
+    if (productContainer) {
+      productContainer.innerHTML = '<div class="muted">ไม่มีข้อมูลสินค้า</div>';
+    }
+  }
+
+  // 4.2 Sales Funnel
+  try {
+    if (typeof renderFunnel === "function") {
+      console.log("🔄 Rendering sales funnel...");
+      renderFunnel(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderFunnel:", error);
+    // Fallback
+    const funnelLeads = document.getElementById("funnel_leads");
+    const funnelQuotes = document.getElementById("funnel_quotes");
+    const funnelClosed = document.getElementById("funnel_closed");
+    if (funnelLeads) funnelLeads.textContent = "-";
+    if (funnelQuotes) funnelQuotes.textContent = "-";
+    if (funnelClosed) funnelClosed.textContent = "-";
+  }
+
+  // 4.3 Target Achievement
+  try {
+    if (typeof renderTarget === "function") {
+      console.log("🎯 Rendering target...");
+      renderTarget(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderTarget:", error);
+    // Fallback
+    const targetActual = document.getElementById("target_actual");
+    const targetGoal = document.getElementById("target_goal");
+    const targetPct = document.getElementById("target_pct");
+    if (targetActual) targetActual.textContent = "ไม่มีข้อมูล";
+    if (targetGoal) targetGoal.textContent = "ไม่มีข้อมูล";
+    if (targetPct) targetPct.textContent = "0%";
+  }
+
+  // ✅ 5. อัปเดตเมตริกอื่นๆ
+  console.log("📊 Rendering other metrics...");
+
+  // 5.1 Monthly Comparison
+  try {
+    if (typeof renderMonthlyComparison === "function") {
+      console.log("📅 Rendering monthly comparison...");
+      renderMonthlyComparison(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderMonthlyComparison:", error);
+  }
+
+  // 5.2 Customer Insight
+  try {
+    if (typeof renderCustomerInsight === "function") {
+      console.log("👥 Rendering customer insight...");
+      renderCustomerInsight(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderCustomerInsight:", error);
+  }
+
+  // 5.3 Call & Visit Yearly
+  try {
+    if (typeof renderCallVisitYearly === "function") {
+      console.log("📞 Rendering call & visit yearly...");
+      renderCallVisitYearly(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderCallVisitYearly:", error);
+    // Fallback values
+    const ids = [
+      "cv_total_calls",
+      "cv_total_visits",
+      "cv_total_presented",
+      "cv_total_quoted",
+      "cv_total_closed",
+    ];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = "N/A";
+    });
+  }
+
+  // 5.4 Lost Deals Chart
+  try {
+    if (typeof renderLostDeals === "function") {
+      console.log("📉 Rendering lost deals...");
+      renderLostDeals(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderLostDeals:", error);
+  }
+
+  // ✅ 6. อัปเดต Top 5
+  console.log("🏆 Rendering Top 5...");
+  if (!state.activeMetric) {
+    state.activeMetric = "sales";
+    console.log("Set default active metric to:", state.activeMetric);
+  }
+
+  try {
+    if (typeof renderTop5 === "function") {
+      renderTop5(payload);
+    } else {
+      console.warn("⚠️ renderTop5 function not found");
+    }
+  } catch (error) {
+    console.error("❌ Error in renderTop5:", error);
+    const top5Wrap = document.getElementById("top5Wrap");
+    if (top5Wrap) {
+      top5Wrap.innerHTML =
+        '<div class="muted">เกิดข้อผิดพลาดในการแสดงผล Top 5</div>';
+    }
+  }
+
+  // ✅ 7. อัปเดต Area Performance
+  try {
+    if (typeof renderAreaPerformance === "function") {
+      console.log("🗺️ Rendering area performance...");
+      renderAreaPerformance(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderAreaPerformance:", error);
+    const container = document.getElementById("areaPerformanceContainer");
+    if (container) {
+      container.innerHTML =
+        '<div class="muted">เกิดข้อผิดพลาดในการแสดงผล Area Performance</div>';
+    }
+  }
+
+  // ✅ 8. อัปเดต Top Performers
+  try {
+    if (typeof renderTopPerformers === "function") {
+      console.log("⭐ Rendering top performers...");
+      renderTopPerformers(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderTopPerformers:", error);
+  }
+
+  // ✅ 9. อัปเดต Conversion Rate
+  try {
+    if (typeof renderConversionRate === "function") {
+      console.log("📊 Rendering conversion rate...");
+      renderConversionRate(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderConversionRate:", error);
+    const container = document.getElementById("conversionContainer");
+    if (container) {
+      container.innerHTML =
+        '<div class="muted">เกิดข้อผิดพลาดในการแสดงผล Conversion Rate</div>';
+    }
+  }
+
+  // ✅ 10. อัปเดต Customer Segmentation (พร้อม fallback)
+  try {
+    if (typeof renderCustomerSegmentation === "function") {
+      console.log("👥 Rendering customer segmentation...");
+
+      // ตรวจสอบว่ามีข้อมูลก่อน
+      if (payload.customerSegmentation) {
+        renderCustomerSegmentation(payload);
+      } else {
+        console.log("ℹ️ No customer segmentation data in payload");
+
+        // ลองหา container และแสดงข้อความว่าไม่มีข้อมูล
+        const container =
+          document.getElementById("customerSegmentationBody") ||
+          document.querySelector("#customerSegmentationTable tbody") ||
+          document.querySelector(".customer-segmentation tbody");
+
+        if (container) {
+          container.innerHTML = `
+            <tr>
+              <td colspan="5" class="muted" style="text-align: center; padding: 20px;">
+                ไม่มีข้อมูล Customer Segmentation
+              </td>
+            </tr>
+          `;
+        }
+      }
+    } else {
+      console.warn("⚠️ renderCustomerSegmentation function not found");
+    }
+  } catch (error) {
+    console.error("❌ Error in renderCustomerSegmentation:", error);
+
+    // Fallback: ลองแสดงข้อความใน container ที่มีอยู่
+    const possibleContainers = [
+      "#customerSegmentationBody",
+      "#customerSegmentationTable tbody",
+      ".customer-segmentation tbody",
+      "[data-section='customer-segmentation'] tbody",
+    ];
+
+    for (const selector of possibleContainers) {
+      const container = document.querySelector(selector);
+      if (container) {
+        container.innerHTML = `
+          <tr>
+            <td colspan="5" class="muted error" style="text-align: center; padding: 20px;">
+              เกิดข้อผิดพลาดในการแสดงผล Customer Segmentation
+            </td>
+          </tr>
+        `;
+        break;
       }
     }
   }
 
-  // 3.2 Sales Funnel Analysis (ใช้โค้ดเดิมของคุณ)
-  if (typeof renderFunnel === "function") {
-    try {
-      console.log("🔄 Rendering Sales Funnel");
-      renderFunnel(payload);
-    } catch (error) {
-      console.error("❌ Error in renderFunnel:", error);
-      // Fallback ถ้าไม่สำเร็จ
-      const funnelLeads = el("funnel_leads");
-      const funnelQuotes = el("funnel_quotes");
-      const funnelClosed = el("funnel_closed");
-      if (funnelLeads) funnelLeads.textContent = "-";
-      if (funnelQuotes) funnelQuotes.textContent = "-";
-      if (funnelClosed) funnelClosed.textContent = "-";
+  // ✅ 11. อัปเดต Product Performance
+  try {
+    if (typeof renderProductPerformance === "function") {
+      console.log("📦 Rendering product performance...");
+      renderProductPerformance(payload);
+    }
+  } catch (error) {
+    console.error("❌ Error in renderProductPerformance:", error);
+    const container = document.getElementById("productPerformanceContainer");
+    if (container) {
+      container.innerHTML =
+        '<div class="muted">เกิดข้อผิดพลาดในการแสดงผล Product Performance</div>';
     }
   }
 
-  // 3.3 Target Achievement (ใช้โค้ดเดิมของคุณ)
-  if (typeof renderTarget === "function") {
-    try {
-      console.log("🔄 Rendering Target");
-      renderTarget(payload);
-    } catch (error) {
-      console.error("❌ Error in renderTarget:", error);
-      // Fallback ถ้าไม่สำเร็จ
-      const targetActual = el("target_actual");
-      const targetGoal = el("target_goal");
-      const targetPct = el("target_pct");
-      if (targetActual) targetActual.textContent = "ไม่มีข้อมูล";
-      if (targetGoal) targetGoal.textContent = "ไม่มีข้อมูล";
-      if (targetPct) targetPct.textContent = "0%";
+  // ✅ 12. อัปเดต Area Heatmap (ถ้ามี)
+  try {
+    if (typeof renderAreaHeatmap === "function" && payload.areaHeatmap) {
+      console.log("🗺️ Rendering area heatmap...");
+      renderAreaHeatmap(payload);
+    } else {
+      console.log("ℹ️ No area heatmap data or function");
+    }
+  } catch (error) {
+    console.error("❌ Error in renderAreaHeatmap:", error);
+    const container = document.getElementById("areaHeatmapContainer");
+    if (container) {
+      container.innerHTML =
+        '<div class="muted">เกิดข้อผิดพลาดในการแสดงผล Area Heatmap</div>';
     }
   }
 
-  // ✅ 4. อัปเดตเมตริกอื่นๆ (ใช้โค้ดเดิมของคุณ)
-  if (typeof renderMonthlyComparison === "function") {
-    renderMonthlyComparison(payload);
+  // ✅ 13. ตรวจสอบและเรียก initChart ถ้าจำเป็น
+  if (!chart && window.Chart) {
+    console.log("🔄 Initializing main chart...");
+    initChart();
+    if (chart && payload.dailyTrend) {
+      setTrend(payload);
+    }
   }
 
-  if (typeof renderCustomerInsight === "function") {
-    renderCustomerInsight(payload);
+  // ✅ 14. ตรวจสอบและเรียก initProductChart ถ้าจำเป็น
+  if (!productChart && window.Chart) {
+    const productCanvas = document.getElementById("productChart");
+    if (productCanvas) {
+      console.log("🔄 Initializing product chart...");
+      initProductChart();
+      if (productChart && payload.productMix) {
+        renderProductMix(payload);
+      }
+    }
   }
 
-  if (typeof renderCallVisitYearly === "function") {
-    renderCallVisitYearly(payload);
+  // ✅ 15. ตรวจสอบและเรียก initLostDealChart ถ้าจำเป็น
+  if (!lostDealChart && window.Chart) {
+    const lostDealCanvas = document.getElementById("lostDealChart");
+    if (lostDealCanvas) {
+      console.log("🔄 Initializing lost deal chart...");
+      initLostDealChart();
+      if (lostDealChart && payload.lostReasons) {
+        renderLostDeals(payload);
+      }
+    }
   }
 
-  if (typeof renderLostDeals === "function") {
-    renderLostDeals(payload);
-  }
+  // ✅ 16. อัปเดต filter status
+  setFilterStatus("พร้อมใช้งาน");
 
-  // ✅ 5. อัปเดต Top 5
-  if (!state.activeMetric) {
-    state.activeMetric = "sales";
-  }
+  // ✅ 17. ตรวจสอบว่ามีข้อผิดพลาดใน console หรือไม่
+  const errorCount = (() => {
+    try {
+      const logs = console.logs || [];
+      return logs.filter((log) => log.type === "error").length;
+    } catch {
+      return 0;
+    }
+  })();
 
-  if (typeof renderTop5 === "function") {
-    renderTop5(payload);
-  }
-
-  // ✅ 6. อัปเดต area performance
-  if (typeof renderAreaPerformance === "function") {
-    renderAreaPerformance(payload);
-  }
-
-  // ✅ 7. อัปเดต top performers
-  if (typeof renderTopPerformers === "function") {
-    renderTopPerformers(payload);
-  }
-
-  // ✅ 8. อัปเดต conversion rate
-  if (typeof renderConversionRate === "function") {
-    renderConversionRate(payload);
-  }
-
-  // ✅ 9. อัปเดต customer segmentation
-  if (typeof renderCustomerSegmentation === "function") {
-    renderCustomerSegmentation(payload);
-  }
-
-  // ✅ 10. อัปเดต product performance
-  if (typeof renderProductPerformance === "function") {
-    renderProductPerformance(payload);
-  }
-
-  // ✅ 11. อัปเดต area heatmap (ถ้ามี)
-  if (typeof renderAreaHeatmap === "function") {
-    renderAreaHeatmap(payload);
+  if (errorCount > 0) {
+    console.warn(`⚠️ Found ${errorCount} errors during UI update`);
   }
 
   console.log("✅ updateAllUI completed successfully");
+  console.groupEnd();
 }
 
 // ✅ HELPER FUNCTION: สำหรับเรียก render อย่างปลอดภัย (fixed parameter order)
@@ -2329,7 +2806,7 @@ function safeRender(
 ) {
   try {
     console.log(
-      `🔧 safeRender: ${containerId}, function: ${renderFunction?.name || "unknown"}`,
+      `🔧 safeRender: ${containerId}, function: ${renderFunction?.name || "anonymous"}`,
     );
 
     if (typeof renderFunction !== "function") {
@@ -2339,21 +2816,16 @@ function safeRender(
       return;
     }
 
-    const container = el(containerId);
+    const container = document.getElementById(containerId);
     if (!container) {
       console.warn(`⚠️ Container ${containerId} not found`);
       return;
     }
 
     // ตรวจสอบว่ามีข้อมูลใน payload หรือไม่
-    const hasData = checkPayloadForData(
-      renderFunction.name || renderFunction.toString(),
-      payload,
-    );
+    const hasData = checkPayloadForData(renderFunction.name, payload);
     if (!hasData) {
-      console.log(
-        `ℹ️ No data for ${renderFunction.name || "renderFunction"}, using fallback`,
-      );
+      console.log(`ℹ️ No data for ${renderFunction.name}, using fallback`);
       container.innerHTML = `<div class="muted">${fallbackMessage}</div>`;
       return;
     }
@@ -2365,11 +2837,79 @@ function safeRender(
       `❌ Error in ${renderFunction?.name || "renderFunction"}:`,
       error,
     );
-    const container = el(containerId);
+    const container = document.getElementById(containerId);
     if (container) {
       container.innerHTML = `<div class="muted error">เกิดข้อผิดพลาดในการแสดงผล</div>`;
     }
   }
+}
+
+function checkPayloadForData(functionName, payload) {
+  if (!payload) return false;
+
+  // Map render functions กับ keys ใน payload
+  const dataMap = {
+    renderTop5: ["topByTeam", "personTotals"],
+    renderAreaPerformance: ["areaPerformance"],
+    renderConversionRate: ["conversionAnalysis", "summary", "personTotals"],
+    renderCustomerSegmentation: ["customerSegmentation"],
+    renderProductPerformance: ["productPerformance", "productMix"],
+    renderAreaHeatmap: ["areaHeatmap"],
+    renderFunnel: ["funnel"],
+    renderMonthlyComparison: ["monthlyComparison", "dailyTrend"],
+    renderTarget: ["target"],
+    renderProductMix: ["productMix"],
+    renderCustomerInsight: ["customerInsight"],
+    renderCallVisitYearly: ["callVisitYearly"],
+    renderLostDeals: ["lostReasons"],
+    renderTopPerformers: ["callVisitAnalysis", "topPerformers"],
+    renderPersonTotalsWithPagination: ["personTotals"],
+    renderPersonTotals: ["personTotals"],
+    setSummary: ["summary"],
+    setTrend: ["dailyTrend"],
+  };
+
+  const keys = dataMap[functionName] || [];
+
+  // ถ้าไม่มี mapping ให้ถือว่ามีข้อมูล (ให้ render function จัดการเอง)
+  if (keys.length === 0) {
+    console.log(`ℹ️ No data mapping for ${functionName}, assuming data exists`);
+    return true;
+  }
+
+  for (const key of keys) {
+    if (payload[key] !== undefined && payload[key] !== null) {
+      // ตรวจสอบ array
+      if (Array.isArray(payload[key]) && payload[key].length > 0) {
+        console.log(
+          `✓ Data found for ${functionName}: ${key} (array with ${payload[key].length} items)`,
+        );
+        return true;
+      }
+      // ตรวจสอบ object
+      if (
+        typeof payload[key] === "object" &&
+        Object.keys(payload[key]).length > 0
+      ) {
+        console.log(
+          `✓ Data found for ${functionName}: ${key} (object with keys: ${Object.keys(payload[key]).join(", ")})`,
+        );
+        return true;
+      }
+      // ตรวจสอบ primitive values
+      if (payload[key] !== "" && payload[key] !== 0) {
+        console.log(
+          `✓ Data found for ${functionName}: ${key} (value: ${payload[key]})`,
+        );
+        return true;
+      }
+    }
+  }
+
+  console.log(
+    `✗ No data found for ${functionName}, checking keys: ${keys.join(", ")}`,
+  );
+  return false;
 }
 
 // ✅ HELPER FUNCTION: ตรวจสอบว่ามีข้อมูลใน payload หรือไม่
@@ -2698,8 +3238,12 @@ function renderFunnel(payload) {
 }
 
 // ---------------- 🆕 Conversion Rate Analysis ----------------
+
 function renderConversionRate(payload) {
   console.log("🔄 renderConversionRate called");
+  console.log("🔍 Conversion Rate payload:", payload?.conversionAnalysis);
+  console.log("🔍 Summary payload:", payload?.summary);
+  console.log("🔍 PersonTotals payload:", payload?.personTotals);
 
   const summary = payload.summary || [];
   const personTotals = payload.personTotals || [];
@@ -2709,10 +3253,32 @@ function renderConversionRate(payload) {
     visits: 0,
     quotes: 0,
   };
-  const range = payload.range || {};
+
+  // ✅ ตรวจสอบว่าข้อมูลถูกต้อง
+  console.log("📊 Summary Totals:", summaryTotals);
+  console.log("📊 Summary Array:", summary);
+
+  // ✅ ตรวจสอบว่าไม่ได้เอา Sales amount ไปหารด้วย Quotes count
+  console.log("⚠️ IMPORTANT: Check if sales is amount or count");
+  console.log("- Sales total:", summaryTotals.sales);
+  console.log("- Quotes total:", summaryTotals.quotes);
+
+  // ถ้า sales เป็นจำนวนเงิน (บาท) และ quotes เป็นจำนวนใบ
+  // จะคำนวณ conversion rate ไม่ได้
+  if (summaryTotals.sales > summaryTotals.quotes * 10000) {
+    console.error(
+      "❌ DETECTED: Sales (amount) vs Quotes (count) unit mismatch!",
+    );
+    console.error("Sales:", summaryTotals.sales, "฿");
+    console.error("Quotes:", summaryTotals.quotes, "ใบ");
+    console.error(
+      "Sales/Quotes ratio:",
+      summaryTotals.sales / summaryTotals.quotes,
+    );
+  }
 
   // ✅ ตรวจสอบปีของข้อมูล
-  const dataYear = range.year || new Date().getFullYear();
+  const dataYear = payload.range?.year || new Date().getFullYear();
   const currentYear = new Date().getFullYear();
   const isCurrentYear = dataYear === currentYear;
 
@@ -2734,24 +3300,74 @@ function renderConversionRate(payload) {
     html += `<div class="muted" style="text-align: center; padding: 40px;">
               ไม่มีข้อมูล Conversion Rate สำหรับปี ${dataYear}
             </div>`;
-    setHTML("conversionContainer", html);
+    document.getElementById("conversionContainer").innerHTML = html;
     return;
   }
 
-  // ✅ 1. Overall Conversion Rate (รวมทั้งหมด)
-  const overallQuotes = summaryTotals.quotes || 0;
-  const overallSales = summaryTotals.sales || 0;
-  const overallCalls = summaryTotals.calls || 0;
-  const overallVisits = summaryTotals.visits || 0;
+  // ✅ สำคัญ: ต้องรู้ว่า sales เป็นจำนวนเงินหรือจำนวนใบ
+  const overallQuotes = Number(summaryTotals.quotes || 0);
+  const overallSalesAmount = Number(summaryTotals.sales || 0); // นี่คือจำนวนเงิน (บาท)
+  const overallCalls = Number(summaryTotals.calls || 0);
+  const overallVisits = Number(summaryTotals.visits || 0);
 
+  console.log("📈 Overall metrics:", {
+    calls: overallCalls,
+    visits: overallVisits,
+    quotes: overallQuotes,
+    salesAmount: overallSalesAmount,
+  });
+
+  // ✅ ปัญหา: เรามี sales เป็นจำนวนเงิน แต่ quotes เป็นจำนวนใบ
+  // เราต้องประมาณการจำนวน deal ที่ปิดได้จากยอดขาย
+  const AVERAGE_DEAL_SIZE = 50000; // สมมติ average deal = 50,000 ฿
+  const estimatedClosedDeals = Math.max(
+    1,
+    Math.round(overallSalesAmount / AVERAGE_DEAL_SIZE),
+  );
+
+  // ✅ การคำนวณ Conversion Rates ที่ถูกต้อง
   const overallQuoteToSaleRate =
-    overallQuotes > 0 ? ((overallSales / overallQuotes) * 100).toFixed(1) : 0;
+    overallQuotes > 0
+      ? Math.min(100, (estimatedClosedDeals / overallQuotes) * 100)
+      : 0;
+
   const overallCallToQuoteRate =
-    overallCalls > 0 ? ((overallQuotes / overallCalls) * 100).toFixed(1) : 0;
+    overallCalls > 0 ? Math.min(100, (overallQuotes / overallCalls) * 100) : 0;
+
   const overallCallToVisitRate =
-    overallCalls > 0 ? ((overallVisits / overallCalls) * 100).toFixed(1) : 0;
+    overallCalls > 0 ? Math.min(100, (overallVisits / overallCalls) * 100) : 0;
+
   const overallVisitToQuoteRate =
-    overallVisits > 0 ? ((overallQuotes / overallVisits) * 100).toFixed(1) : 0;
+    overallVisits > 0
+      ? Math.min(100, (overallQuotes / overallVisits) * 100)
+      : 0;
+
+  console.log("📊 Calculated rates:", {
+    quoteToSaleRate: overallQuoteToSaleRate,
+    callToQuoteRate: overallCallToQuoteRate,
+    callToVisitRate: overallCallToVisitRate,
+    visitToQuoteRate: overallVisitToQuoteRate,
+    estimatedClosedDeals: estimatedClosedDeals,
+    averageDealSize: AVERAGE_DEAL_SIZE,
+  });
+
+  // ✅ แสดง warning ถ้า conversion rate ผิดปกติ
+  if (overallQuoteToSaleRate > 100 || overallQuoteToSaleRate < 0) {
+    console.error("❌ ABNORMAL CONVERSION RATE:", overallQuoteToSaleRate);
+    console.error("This usually means sales/quotes units are mismatched!");
+
+    // แสดงข้อความเตือนใน UI
+    html += `
+      <div class="warning-message" style="background: rgba(239,68,68,0.1); border: 1px solid rgba(239,68,68,0.3); 
+              border-radius: 6px; padding: 10px; margin-bottom: 15px;">
+        <div style="color: #ef4444; font-weight: 600; margin-bottom: 5px;">⚠️ ข้อมูลหน่วยไม่ตรงกัน</div>
+        <div style="color: #94a3b8; font-size: 13px;">
+          Sales (${fmt.format(overallSalesAmount)} ฿) และ Quotes (${fmt.format(overallQuotes)} ใบ) เป็นคนละหน่วย<br>
+          Conversion rate นี้เป็นค่าประมาณการจากยอดขาย
+        </div>
+      </div>
+    `;
+  }
 
   // ✅ Header section with overall metrics
   html += `
@@ -2762,45 +3378,50 @@ function renderConversionRate(payload) {
           <div class="funnel-step">
             <div class="step-label">การโทร</div>
             <div class="step-value">${fmt.format(overallCalls)}</div>
-            <div class="step-rate">${overallCallToVisitRate}% →</div>
+            <div class="step-rate">${overallCallToVisitRate.toFixed(1)}% →</div>
           </div>
           <div class="funnel-step">
             <div class="step-label">การเข้าพบ</div>
             <div class="step-value">${fmt.format(overallVisits)}</div>
-            <div class="step-rate">${overallVisitToQuoteRate}% →</div>
+            <div class="step-rate">${overallVisitToQuoteRate.toFixed(1)}% →</div>
           </div>
           <div class="funnel-step">
             <div class="step-label">ใบเสนอราคา</div>
             <div class="step-value">${fmt.format(overallQuotes)}</div>
-            <div class="step-rate">${overallQuoteToSaleRate}% →</div>
+            <div class="step-rate">${overallQuoteToSaleRate.toFixed(1)}% →</div>
           </div>
           <div class="funnel-step success">
-            <div class="step-label">ยอดขาย</div>
-            <div class="step-value">${fmt.format(overallSales)} ฿</div>
+            <div class="step-label">ยอดขาย (ประมาณการ)</div>
+            <div class="step-value">${fmt.format(estimatedClosedDeals)} ดีล</div>
             <div class="step-rate">สุดท้าย</div>
           </div>
         </div>
         <div class="funnel-summary">
           <div class="summary-item">
-            <div class="summary-label">อัตราการปิดการขายทั้งหมด</div>
-            <div class="summary-value">${overallQuoteToSaleRate}%</div>
+            <div class="summary-label">อัตราการปิดการขาย</div>
+            <div class="summary-value">${overallQuoteToSaleRate.toFixed(1)}%</div>
+            <div class="summary-note">(ประมาณการจากยอดขาย)</div>
           </div>
           <div class="summary-item">
             <div class="summary-label">ประสิทธิภาพการโทร → ใบเสนอ</div>
-            <div class="summary-value">${overallCallToQuoteRate}%</div>
+            <div class="summary-value">${overallCallToQuoteRate.toFixed(1)}%</div>
+          </div>
+          <div class="summary-item">
+            <div class="summary-label">ยอดขายรวม</div>
+            <div class="summary-value">${fmt.format(overallSalesAmount)} ฿</div>
           </div>
         </div>
       </div>
     </div>
   `;
 
-  // ✅ 2. Conversion Rate ตามทีม
+  // ✅ 2. Conversion Rate ตามทีม (ใช้วิธีการเดียวกัน)
   html += `<div class="conversion-teams-title"><h3>Conversion Rate ตามทีม (ปี ${dataYear})</h3></div>`;
   html += `<div class="conversion-teams-grid">`;
 
   // กรองทีมที่มีข้อมูล
   const teamsWithData = summary.filter(
-    (team) => (team.quotes || 0) > 0 || (team.sales || 0) > 0,
+    (team) => (team.quotes || 0) > 0 && (team.sales || 0) > 0,
   );
 
   if (teamsWithData.length === 0) {
@@ -2808,18 +3429,25 @@ function renderConversionRate(payload) {
               ไม่มีข้อมูลทีมสำหรับปี ${dataYear}
             </div>`;
   } else {
-    teamsWithData.forEach((team) => {
+    teamsWithData.forEach((team, index) => {
       const teamName = escapeHtml(team.team || "ไม่ระบุทีม");
-      const teamSales = Number(team.sales || 0);
+      const teamSalesAmount = Number(team.sales || 0); // จำนวนเงิน (บาท)
       const teamQuotes = Number(team.quotes || 0);
       const teamCalls = Number(team.calls || 0);
       const teamVisits = Number(team.visits || 0);
 
-      // ✅ คำนวณ Conversion Rates
+      // ✅ คำนวณ Conversion Rates (ใช้ average deal size เดียวกัน)
+      const teamEstimatedDeals = Math.max(
+        1,
+        Math.round(teamSalesAmount / AVERAGE_DEAL_SIZE),
+      );
       const quoteToSaleRate =
-        teamQuotes > 0 ? ((teamSales / teamQuotes) * 100).toFixed(1) : 0;
+        teamQuotes > 0
+          ? Math.min(100, (teamEstimatedDeals / teamQuotes) * 100)
+          : 0;
+
       const callToQuoteRate =
-        teamCalls > 0 ? ((teamQuotes / teamCalls) * 100).toFixed(1) : 0;
+        teamCalls > 0 ? Math.min(100, (teamQuotes / teamCalls) * 100) : 0;
 
       // ✅ กำหนดสีตาม performance
       const quoteToSaleRateNum = parseFloat(quoteToSaleRate);
@@ -2828,13 +3456,20 @@ function renderConversionRate(payload) {
       else if (quoteToSaleRateNum >= 20) rateColorClass = "good";
       else if (quoteToSaleRateNum >= 10) rateColorClass = "fair";
 
+      // ตรวจสอบว่ามีข้อมูลผิดปกติหรือไม่
+      const hasDataIssue = teamSalesAmount > teamQuotes * 10000;
+      const issueBadge = hasDataIssue
+        ? '<span class="issue-badge" title="ข้อมูลหน่วยอาจไม่ตรงกัน">⚠️</span>'
+        : "";
+
       html += `
-        <div class="conversion-team-card">
+        <div class="conversion-team-card ${hasDataIssue ? "has-issue" : ""}">
           <div class="team-header">
-            <div class="team-name">${teamName}</div>
+            <div class="team-name">${teamName} ${issueBadge}</div>
             <div class="team-performance ${rateColorClass}">
-              <div class="main-rate">${quoteToSaleRate}%</div>
+              <div class="main-rate">${quoteToSaleRate.toFixed(1)}%</div>
               <div class="rate-label">อัตราการปิด</div>
+              ${hasDataIssue ? '<div class="rate-note">(ประมาณการ)</div>' : ""}
             </div>
           </div>
           
@@ -2853,20 +3488,34 @@ function renderConversionRate(payload) {
             </div>
             <div class="metric-row highlight">
               <span class="metric-label">ยอดขาย</span>
-              <span class="metric-value">${fmt.format(teamSales)} ฿</span>
+              <span class="metric-value">${fmt.format(teamSalesAmount)} ฿</span>
+            </div>
+            <div class="metric-row">
+              <span class="metric-label">ประมาณการดีลที่ปิด</span>
+              <span class="metric-value">${fmt.format(teamEstimatedDeals)} ดีล</span>
             </div>
           </div>
           
           <div class="team-stats-summary">
             <div class="stat-item">
               <div class="stat-label">อัตราการโทร→ใบเสนอ</div>
-              <div class="stat-value">${callToQuoteRate}%</div>
+              <div class="stat-value">${callToQuoteRate.toFixed(1)}%</div>
             </div>
             <div class="stat-item">
-              <div class="stat-label">ค่าเฉลี่ย/ใบเสนอ</div>
-              <div class="stat-value">${teamQuotes > 0 ? fmt.format(Math.round(teamSales / teamQuotes)) : 0} ฿</div>
+              <div class="stat-label">เฉลี่ย/ใบเสนอ</div>
+              <div class="stat-value">${teamQuotes > 0 ? fmt.format(Math.round(teamSalesAmount / teamQuotes)) : 0} ฿</div>
             </div>
           </div>
+          
+          ${
+            hasDataIssue
+              ? `
+          <div class="team-note">
+            <small>⚠️ ข้อมูลประมาณการ (Sales vs Quotes หน่วยไม่ตรงกัน)</small>
+          </div>
+          `
+              : ""
+          }
         </div>
       `;
     });
@@ -2874,7 +3523,7 @@ function renderConversionRate(payload) {
 
   html += `</div>`;
 
-  // ✅ 3. Top Performers (Individual) - เฉพาะปีปัจจุบัน
+  // ✅ 3. Top Performers (Individual)
   if (personTotals.length > 0) {
     html += `<div class="conversion-individual-title"><h3>ผู้ปฏิบัติงานดีเด่น (ปี ${dataYear})</h3></div>`;
     html += `<div class="conversion-individual-grid">`;
@@ -2882,37 +3531,46 @@ function renderConversionRate(payload) {
     // กรองบุคคลที่มีใบเสนอราคาและยอดขาย
     const individualsWithPerformance = personTotals
       .map((person) => {
-        const sales = Number(person.sales || 0);
+        const salesAmount = Number(person.sales || 0);
         const quotes = Number(person.quotes || 0);
-        const conversionRate = quotes > 0 ? (sales / quotes) * 100 : 0;
+        const estimatedDeals = Math.max(
+          1,
+          Math.round(salesAmount / AVERAGE_DEAL_SIZE),
+        );
+        const conversionRate =
+          quotes > 0 ? Math.min(100, (estimatedDeals / quotes) * 100) : 0;
+
         return {
           ...person,
           conversionRate: conversionRate,
-          avgSalePerQuote: quotes > 0 ? Math.round(sales / quotes) : 0,
+          estimatedDeals: estimatedDeals,
+          avgSalePerQuote: quotes > 0 ? Math.round(salesAmount / quotes) : 0,
         };
       })
-      .filter((p) => p.quotes > 0) // ✅ เฉพาะที่มีใบเสนอราคา
+      .filter((p) => p.quotes > 0 && p.sales > 0)
       .sort((a, b) => b.conversionRate - a.conversionRate)
       .slice(0, 5);
 
     if (individualsWithPerformance.length > 0) {
       individualsWithPerformance.forEach((person, index) => {
         const conversionRate = person.conversionRate.toFixed(1);
+        const hasDataIssue = person.sales > person.quotes * 10000;
 
         html += `
-          <div class="individual-card">
+          <div class="individual-card ${hasDataIssue ? "has-issue" : ""}">
             <div class="individual-rank">#${index + 1}</div>
             <div class="individual-info">
               <div class="individual-name">${escapeHtml(person.person || "ไม่ระบุชื่อ")}</div>
               <div class="individual-stats">
                 <span>${fmt.format(person.quotes || 0)} ใบเสนอ</span>
                 <span>•</span>
-                <span>${fmt.format(person.sales || 0)} ฿</span>
+                <span>${fmt.format(person.estimatedDeals || 0)} ดีล (ประมาณ)</span>
               </div>
             </div>
             <div class="individual-conversion">
               <div class="conversion-value">${conversionRate}%</div>
               <div class="conversion-label">อัตราการปิด</div>
+              ${hasDataIssue ? '<div class="conversion-note">ประมาณการ</div>' : ""}
             </div>
           </div>
         `;
@@ -2929,7 +3587,7 @@ function renderConversionRate(payload) {
   // ✅ 4. Legend/Explanation
   html += `
     <div class="conversion-legend">
-      <div class="legend-title">คำอธิบาย:</div>
+      <div class="legend-title">คำอธิบายและข้อควรระวัง:</div>
       <div class="legend-items">
         <div class="legend-item">
           <span class="legend-color excellent"></span>
@@ -2939,7 +3597,7 @@ function renderConversionRate(payload) {
           <span class="legend-color good"></span>
           <span class="legend-text">ดี (20-29%)</span>
         </div>
-        <div class="legend-item">
+       div class="legend-item">
           <span class="legend-color fair"></span>
           <span class="legend-text">ปานกลาง (10-19%)</span>
         </div>
@@ -2948,33 +3606,138 @@ function renderConversionRate(payload) {
           <span class="legend-text">ต้องปรับปรุง (< 10%)</span>
         </div>
       </div>
-      <div class="legend-note">
-        *อัตราการปิดการขาย = (ยอดขาย / ใบเสนอราคา) × 100
+      <div class="legend-warning">
+        <div style="color: #f59e0b; font-weight: 600; margin-bottom: 5px;">⚠️ หมายเหตุสำคัญ:</div>
+        <div style="color: #94a3b8; font-size: 13px; line-height: 1.5;">
+          1. <strong>Conversion Rate คำนวณจากประมาณการ</strong> เพราะข้อมูล Sales (บาท) และ Quotes (ใบ) เป็นคนละหน่วย<br>
+          2. สมมติ Average Deal Size = 50,000 ฿ เพื่อแปลงยอดขายเป็นจำนวนดีล<br>
+          3. สูตร: Conversion Rate = (ประมาณการดีลที่ปิดได้ ÷ จำนวนใบเสนอราคา) × 100<br>
+          4. ตัวเลขนี้เป็นแนวทางอ้างอิง ไม่ใช่ค่าที่แท้จริง
+        </div>
       </div>
     </div>
   `;
 
-  setHTML("conversionContainer", html);
+  const container = document.getElementById("conversionContainer");
+  if (container) {
+    container.innerHTML = html;
+  } else {
+    console.error("❌ conversionContainer not found");
+  }
+
+  console.log("✅ renderConversionRate completed");
+}
+
+// ✅ เพิ่ม CSS สำหรับ issue indicators
+function addConversionRateCSS() {
+  if (!document.getElementById("conversion-rate-css")) {
+    const style = document.createElement("style");
+    style.id = "conversion-rate-css";
+    style.textContent = `
+      .warning-message {
+        animation: pulse 2s infinite;
+      }
+      
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.8; }
+      }
+      
+      .issue-badge {
+        color: #f59e0b;
+        margin-left: 4px;
+        font-size: 12px;
+        cursor: help;
+      }
+      
+      .has-issue {
+        border: 1px solid rgba(245, 158, 11, 0.3);
+        background: rgba(245, 158, 11, 0.05);
+      }
+      
+      .rate-note, .conversion-note {
+        font-size: 10px;
+        color: #f59e0b;
+        margin-top: 2px;
+      }
+      
+      .team-note {
+        margin-top: 8px;
+        padding: 6px;
+        background: rgba(245, 158, 11, 0.1);
+        border-radius: 4px;
+        font-size: 11px;
+        color: #f59e0b;
+      }
+      
+      .legend-warning {
+        margin-top: 15px;
+        padding: 10px;
+        background: rgba(245, 158, 11, 0.1);
+        border-radius: 6px;
+        border-left: 3px solid #f59e0b;
+      }
+      
+      .summary-note {
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+      }
+    `;
+    document.head.appendChild(style);
+  }
 }
 
 // ---------------- 🆕 Customer Segmentation ----------------
 
 function renderCustomerSegmentation(payload) {
   console.log("🔄 renderCustomerSegmentation called");
+  console.log("Payload customerSegmentation:", payload?.customerSegmentation);
+
+  // ✅ 1. ตรวจสอบว่ามี container หรือไม่ ถ้าไม่มีให้สร้าง
+  let container = document.getElementById("customerSegmentationBody");
+
+  if (!container) {
+    console.log(
+      "⚠️ customerSegmentationBody not found, checking for alternatives...",
+    );
+
+    // ลองหาตาราง customer segmentation ด้วยวิธีอื่น
+    const possibleSelectors = [
+      "#customerSegmentationTable tbody",
+      "#customerSegmentation tbody",
+      ".customer-segmentation tbody",
+      "[data-section='customer-segmentation'] tbody",
+    ];
+
+    for (const selector of possibleSelectors) {
+      container = document.querySelector(selector);
+      if (container) {
+        console.log(`✅ Found container using selector: ${selector}`);
+        break;
+      }
+    }
+
+    // ถ้ายังไม่เจอ ลองสร้าง container ใหม่
+    if (!container) {
+      console.log("🔄 Creating customer segmentation container...");
+      container = createCustomerSegmentationContainer();
+    }
+  }
+
+  if (!container) {
+    console.error("❌ Cannot find or create customer segmentation container");
+    return;
+  }
 
   const segmentation = payload.customerSegmentation || {};
   const items = segmentation.items || [];
   const summary = segmentation.summary || {};
   const meta = segmentation.meta || {};
 
-  const container = document.getElementById("customerSegmentationBody");
-  if (!container) {
-    console.error("❌ customerSegmentationBody element not found");
-    return;
-  }
-
-  // ตรวจสอบว่ามีข้อมูลหรือไม่
+  // ✅ 2. ตรวจสอบว่ามีข้อมูลหรือไม่
   if (items.length === 0) {
+    console.log("ℹ️ No customer segmentation data");
     container.innerHTML = `
       <tr>
         <td colspan="5" class="muted" style="text-align: center; padding: 40px;">
@@ -2982,10 +3745,13 @@ function renderCustomerSegmentation(payload) {
         </td>
       </tr>
     `;
+
+    // อัปเดต header ถ้ามี
+    updateCustomerSegmentationHeader(summary);
     return;
   }
 
-  // ✅ สร้างตาราง
+  // ✅ 3. สร้างตาราง
   let html = "";
 
   items.forEach((item, index) => {
@@ -2999,49 +3765,178 @@ function renderCustomerSegmentation(payload) {
     const maxSales = items[0]?.sales || 1;
     const salesPercentage = (item.sales / maxSales) * 100;
 
+    // รองรับฟิลด์ชื่อต่างๆ
+    const type = escapeHtml(
+      item.type ||
+        item.segment ||
+        item.category ||
+        item.label ||
+        "ไม่ระบุประเภท",
+    );
+
+    const uniqueCompanies = Number(
+      item.uniqueCompanies || item.companies || item.count || 0,
+    );
+    const sales = Number(item.sales || item.value || item.amount || 0);
+    const percentOfTotal = Number(
+      item.percentOfTotal || item.percentage || item.pct || 0,
+    );
+    const avgPerDeal = Number(item.avgPerDeal || item.average || item.avg || 0);
+
     html += `
       <tr class="${rankClass}">
         <td>
           <div class="segment-type">
             <span class="segment-rank">${index + 1}</span>
-            <span class="segment-name">${escapeHtml(item.type)}</span>
+            <span class="segment-name">${type}</span>
           </div>
           <div class="segment-progress">
             <div class="segment-bar" style="width: ${salesPercentage}%"></div>
           </div>
         </td>
-        <td class="num">${fmt.format(item.uniqueCompanies || 0)}</td>
-        <td class="num">${fmt.format(item.sales)} ฿</td>
+        <td class="num">${fmt.format(uniqueCompanies)}</td>
+        <td class="num">${fmt.format(sales)} ฿</td>
         <td class="num">
-          <span class="percent-badge ${getPercentClass(item.percentOfTotal)}">
-            ${item.percentOfTotal.toFixed(1)}%
+          <span class="percent-badge ${getPercentClass(percentOfTotal)}">
+            ${percentOfTotal.toFixed(1)}%
           </span>
         </td>
-        <td class="num">${fmt.format(Math.round(item.avgPerDeal))} ฿</td>
+        <td class="num">${fmt.format(Math.round(avgPerDeal))} ฿</td>
       </tr>
     `;
   });
 
-  // ✅ เพิ่ม summary row
+  // ✅ 4. เพิ่ม summary row
   if (summary.totalSales > 0) {
     html += `
       <tr class="summary-row">
         <td><strong>รวมทั้งหมด</strong> (${summary.year || "ปีปัจจุบัน"})</td>
-        <td class="num"><strong>${fmt.format(summary.totalUniqueCompanies || 0)}</strong></td>
+        <td class="num"><strong>${fmt.format(summary.totalUniqueCompanies || summary.totalCompanies || 0)}</strong></td>
         <td class="num"><strong>${fmt.format(summary.totalSales)} ฿</strong></td>
         <td class="num"><strong>100%</strong></td>
-        <td class="num"><strong>${fmt.format(Math.round(summary.averageDealSize))} ฿</strong></td>
+        <td class="num"><strong>${fmt.format(Math.round(summary.averageDealSize || summary.avgDeal || 0))} ฿</strong></td>
       </tr>
     `;
   }
 
   container.innerHTML = html;
 
-  // ✅ อัปเดต header ถ้ามี
-  const headerNote = document.querySelector(".customer-segmentation-note");
-  if (headerNote) {
-    headerNote.textContent = `จำนวนทั้งหมด: ${fmt.format(summary.totalUniqueCompanies || 0)} บริษัท, ยอดขายรวม: ${fmt.format(summary.totalSales || 0)} ฿ (ปี ${summary.year || new Date().getFullYear()})`;
+  // ✅ 5. อัปเดต header
+  updateCustomerSegmentationHeader(summary);
+
+  console.log(`✅ Customer segmentation rendered: ${items.length} items`);
+}
+
+// ✅ Helper: สร้าง container ถ้าไม่มี
+function createCustomerSegmentationContainer() {
+  console.log("🔧 Creating customer segmentation container...");
+
+  // ลองหาตาราง customer segmentation ใน HTML
+  const existingTables = document.querySelectorAll("table");
+  let customerSegmentationTable = null;
+
+  existingTables.forEach((table) => {
+    const headers = Array.from(table.querySelectorAll("th")).map((th) =>
+      th.textContent.toLowerCase(),
+    );
+    const customerHeaders = [
+      "ประเภท",
+      "segment",
+      "customer",
+      "type",
+      "category",
+    ];
+
+    if (
+      headers.some((header) =>
+        customerHeaders.some((ch) => header.includes(ch)),
+      )
+    ) {
+      customerSegmentationTable = table;
+    }
+  });
+
+  if (customerSegmentationTable) {
+    // ถ้ามีตารางอยู่แล้ว ให้เพิ่ม tbody ถ้าไม่มี
+    let tbody = customerSegmentationTable.querySelector("tbody");
+    if (!tbody) {
+      tbody = document.createElement("tbody");
+      customerSegmentationTable.appendChild(tbody);
+    }
+    tbody.id = "customerSegmentationBody";
+    return tbody;
   }
+
+  // ถ้าไม่มีตารางเลย ให้สร้างใหม่
+  const section = document.createElement("div");
+  section.className = "section customer-segmentation";
+  section.innerHTML = `
+    <div class="section-header">
+      <h3>Customer Segmentation</h3>
+      <div class="section-subtitle" id="customerSegmentationSubtitle"></div>
+    </div>
+    <div class="table-container">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>ประเภทลูกค้า</th>
+            <th class="num">จำนวนบริษัท</th>
+            <th class="num">ยอดขาย</th>
+            <th class="num">ส่วนแบ่ง</th>
+            <th class="num">เฉลี่ย/ดีล</th>
+          </tr>
+        </thead>
+        <tbody id="customerSegmentationBody"></tbody>
+      </table>
+    </div>
+  `;
+
+  // หาที่วาง section ใหม่
+  const targetSections = [
+    "#productPerformanceContainer",
+    "#areaPerformanceContainer",
+    "#conversionContainer",
+    ".main-grid",
+  ];
+
+  let inserted = false;
+  for (const selector of targetSections) {
+    const target = document.querySelector(selector);
+    if (target) {
+      target.parentNode.insertBefore(section, target.nextSibling);
+      inserted = true;
+      console.log(`✅ Inserted customer segmentation after: ${selector}`);
+      break;
+    }
+  }
+
+  if (!inserted) {
+    document.body.appendChild(section);
+  }
+
+  return document.getElementById("customerSegmentationBody");
+}
+
+// ✅ Helper: อัปเดต header
+function updateCustomerSegmentationHeader(summary) {
+  const subtitle = document.getElementById("customerSegmentationSubtitle");
+  if (!subtitle) return;
+
+  if (summary.totalSales > 0) {
+    subtitle.textContent =
+      `จำนวนทั้งหมด: ${fmt.format(summary.totalUniqueCompanies || 0)} บริษัท, ` +
+      `ยอดขายรวม: ${fmt.format(summary.totalSales || 0)} ฿ ` +
+      `(ปี ${summary.year || new Date().getFullYear()})`;
+  } else {
+    subtitle.textContent = "Customer Segmentation Analysis";
+  }
+}
+
+// ✅ Helper: ฟังก์ชันกำหนดคลาสตามเปอร์เซ็นต์
+function getPercentClass(percent) {
+  if (percent >= 30) return "high";
+  if (percent >= 15) return "medium";
+  return "low";
 }
 
 // ฟังก์ชันช่วยเหลือสำหรับกำหนดคลาสตามเปอร์เซ็นต์
@@ -3631,7 +4526,13 @@ function renderPersonTotals(payload) {
 
 function formatValue(metric, value) {
   if (metric === "conversion") {
-    return `${Number(value).toFixed(1)}%`;
+    const numValue = Number(value); // value ควรเป็นเปอร์เซ็นต์แล้ว (เช่น 25.5 สำหรับ 25.5%)
+    if (numValue > 1) {
+      // ตรวจสอบว่าค่าเป็นเปอร์เซ็นต์หรืออัตราส่วน
+      return `${numValue.toFixed(1)}%`; // เป็นเปอร์เซ็นต์แล้ว (เช่น 25.5)
+    } else {
+      return `${(numValue * 100).toFixed(1)}%`; // เป็นอัตราส่วน (เช่น 0.255) ต้องแปลงเป็นเปอร์เซ็นต์
+    }
   } else if (metric === "sales") {
     return `${fmt.format(Number(value))} ฿`;
   }
@@ -3733,47 +4634,161 @@ function createFallbackTopByTeam(payload) {
     return null;
   }
 
+  // ตรวจสอบโครงสร้างข้อมูล
+  console.log("🔍 Person Totals structure:", {
+    sample: personTotals[0],
+    hasActualClose: personTotals.some((p) => p.actualClose !== undefined),
+    hasClosedDeals: personTotals.some((p) => p.closedDeals !== undefined),
+    fields: Object.keys(personTotals[0] || {}),
+  });
+
   const topByTeam = {};
 
   // สร้างทีม "ทั่วไป" สำหรับคนที่ไม่มีทีม
   const generalTeam = {
     topSales: personTotals
+      .filter((p) => Number(p.sales || 0) > 0)
       .map((p) => ({
         person: p.person || p.name || "ไม่ระบุชื่อ",
         sales: Number(p.sales || 0),
         calls: Number(p.calls || 0),
         visits: Number(p.visits || 0),
         quotes: Number(p.quotes || 0),
+        // เพิ่มฟิลด์สำหรับ conversion rate
+        actualClose: Number(p.actualClose || p.closedDeals || 0),
       }))
       .sort((a, b) => b.sales - a.sales)
-      .slice(0, 5),
+      .slice(0, 10),
   };
 
-  // สร้าง topCalls
-  generalTeam.topCalls = [...generalTeam.topSales]
-    .sort((a, b) => b.calls - a.calls)
-    .slice(0, 5);
+  // สร้าง topConversion - ใช้ actualClose ถ้ามี
+  generalTeam.topConversion = personTotals
+    .filter((p) => {
+      const quotes = Number(p.quotes || 0);
+      const actualClose = Number(p.actualClose || p.closedDeals || 0);
+      return quotes > 0 && actualClose > 0;
+    })
+    .map((p) => {
+      const sales = Number(p.sales || 0);
+      const quotes = Number(p.quotes || 0);
+      const actualClose = Number(p.actualClose || p.closedDeals || 0);
 
-  // สร้าง topVisits
-  generalTeam.topVisits = [...generalTeam.topSales]
-    .sort((a, b) => b.visits - a.visits)
-    .slice(0, 5);
+      // ใช้ actualClose (จำนวนยอดขายที่ปิดได้) แทน sales amount
+      const conversionRate = calculateConversionRate(
+        sales,
+        quotes,
+        actualClose,
+      );
 
-  // สร้าง topQuotes
-  generalTeam.topQuotes = [...generalTeam.topSales]
-    .sort((a, b) => b.quotes - a.quotes)
-    .slice(0, 5);
-
-  // สร้าง topConversion (คำนวณจาก sales/quotes)
-  generalTeam.topConversion = generalTeam.topSales
-    .map((p) => ({
-      ...p,
-      conversionRate: p.quotes > 0 ? (p.sales / p.quotes) * 100 : 0,
-    }))
+      return {
+        person: p.person || p.name || "ไม่ระบุชื่อ",
+        sales: sales,
+        calls: Number(p.calls || 0),
+        visits: Number(p.visits || 0),
+        quotes: quotes,
+        actualClose: actualClose,
+        conversionRate: conversionRate,
+      };
+    })
+    .filter((p) => p.conversionRate > 0)
     .sort((a, b) => b.conversionRate - a.conversionRate)
     .slice(0, 5);
 
+  // ถ้าไม่มีข้อมูล conversion (ไม่มี actualClose) ให้คำนวณแบบประมาณการ
+  if (generalTeam.topConversion.length === 0) {
+    console.log("ℹ️ No actualClose data, estimating conversion rate...");
+
+    // ประมาณการ: สมมติ average deal size เพื่อแปลง sales amount เป็นจำนวนใบ
+    const AVERAGE_DEAL_SIZE = 50000; // 50,000 ฿ ต่อใบ
+
+    generalTeam.topConversion = personTotals
+      .filter((p) => {
+        const sales = Number(p.sales || 0);
+        const quotes = Number(p.quotes || 0);
+        return sales > 0 && quotes > 0;
+      })
+      .map((p) => {
+        const sales = Number(p.sales || 0);
+        const quotes = Number(p.quotes || 0);
+
+        // ประมาณการจำนวนยอดขายที่ปิดได้จาก sales amount
+        const estimatedClosedDeals = Math.round(sales / AVERAGE_DEAL_SIZE);
+        const conversionRate = Math.min(
+          100,
+          (estimatedClosedDeals / quotes) * 100,
+        );
+
+        return {
+          person: p.person || p.name || "ไม่ระบุชื่อ",
+          sales: sales,
+          calls: Number(p.calls || 0),
+          visits: Number(p.visits || 0),
+          quotes: quotes,
+          estimatedClosedDeals: estimatedClosedDeals,
+          conversionRate: conversionRate,
+          isEstimated: true,
+        };
+      })
+      .filter((p) => p.conversionRate > 0 && p.conversionRate <= 100)
+      .sort((a, b) => b.conversionRate - a.conversionRate)
+      .slice(0, 5);
+  }
+
+  // topCalls, topVisits, topQuotes (เหมือนเดิม)
+  generalTeam.topCalls = personTotals
+    .filter((p) => Number(p.calls || 0) > 0)
+    .map((p) => ({
+      person: p.person || p.name || "ไม่ระบุชื่อ",
+      sales: Number(p.sales || 0),
+      calls: Number(p.calls || 0),
+      visits: Number(p.visits || 0),
+      quotes: Number(p.quotes || 0),
+    }))
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 5);
+
+  generalTeam.topVisits = personTotals
+    .filter((p) => Number(p.visits || 0) > 0)
+    .map((p) => ({
+      person: p.person || p.name || "ไม่ระบุชื่อ",
+      sales: Number(p.sales || 0),
+      calls: Number(p.calls || 0),
+      visits: Number(p.visits || 0),
+      quotes: Number(p.quotes || 0),
+    }))
+    .sort((a, b) => b.visits - a.visits)
+    .slice(0, 5);
+
+  generalTeam.topQuotes = personTotals
+    .filter((p) => Number(p.quotes || 0) > 0)
+    .map((p) => ({
+      person: p.person || p.name || "ไม่ระบุชื่อ",
+      sales: Number(p.sales || 0),
+      calls: Number(p.calls || 0),
+      visits: Number(p.visits || 0),
+      quotes: Number(p.quotes || 0),
+    }))
+    .sort((a, b) => b.quotes - a.quotes)
+    .slice(0, 5);
+
   topByTeam["ทั่วไป"] = generalTeam;
+
+  console.log("📊 Fallback TopByTeam created:", {
+    sales: generalTeam.topSales.length,
+    calls: generalTeam.topCalls.length,
+    visits: generalTeam.topVisits.length,
+    quotes: generalTeam.topQuotes.length,
+    conversion: generalTeam.topConversion.length,
+    conversionIsEstimated: generalTeam.topConversion.some((p) => p.isEstimated),
+    conversionSample: generalTeam.topConversion.slice(0, 3).map((p) => ({
+      person: p.person,
+      quotes: p.quotes,
+      sales: fmt.format(p.sales),
+      actualClose: p.actualClose,
+      estimatedDeals: p.estimatedClosedDeals,
+      conversionRate: p.conversionRate.toFixed(1) + "%",
+    })),
+  });
 
   return topByTeam;
 }
@@ -3782,30 +4797,94 @@ function createFallbackTopByTeam(payload) {
 function renderTop5WithData(wrap, topByTeam) {
   wrap.innerHTML = "";
 
+  // Helper functions สำหรับการจัดการ conversion rate
+  const calculateConversionRate = (salesAmount, quotesCount) => {
+    const salesNum = Number(salesAmount || 0);
+    const quotesNum = Number(quotesCount || 0);
+
+    if (quotesNum <= 0) return 0;
+    if (salesNum <= 0) return 0;
+
+    // ตรวจสอบว่า salesNum เป็นจำนวนเงิน (บาท) หรือจำนวนใบ
+    // ถ้า salesNum มากกว่า quotesNum มากๆ แสดงว่าเป็นจำนวนเงิน
+    const AVERAGE_DEAL_SIZE = 50000; // สมมติ average deal size 50,000 ฿
+    const estimatedDeals = Math.max(
+      1,
+      Math.round(salesNum / AVERAGE_DEAL_SIZE),
+    );
+
+    // ใช้ estimated deals แทน sales amount
+    const rate = (estimatedDeals / quotesNum) * 100;
+    return Math.min(100, rate); // ไม่ให้เกิน 100%
+  };
+
+  const formatValue = (metric, value, row = null) => {
+    const numValue = Number(value);
+
+    switch (metric) {
+      case "conversion":
+        if (numValue <= 0) return "0%";
+        return `${numValue.toFixed(1)}%`;
+
+      case "sales":
+        return `${fmt.format(numValue)} ฿`;
+
+      case "calls":
+      case "visits":
+      case "quotes":
+        return fmt.format(numValue);
+
+      default:
+        return fmt.format(numValue);
+    }
+  };
+
+  // กรองทีมที่มีข้อมูลตามเมตริกที่เลือก
   const teams = Object.keys(topByTeam)
     .filter((team) => {
       const teamData = topByTeam[team];
       if (!teamData) return false;
 
-      // ตรวจสอบว่าทีมนี้มีข้อมูลตามเมตริกที่เลือกหรือไม่
       const metricKey = getMetricKey(state.activeMetric);
-      const list = teamData[metricKey] || [];
+      let list = teamData[metricKey] || [];
+
+      // สำหรับ conversion rate: กรองเฉพาะที่มีใบเสนอราคา > 0
+      if (state.activeMetric === "conversion") {
+        list = list.filter((item) => {
+          const quotes = Number(item.quotes || 0);
+          const sales = Number(item.sales || 0);
+          return quotes > 0 && sales > 0;
+        });
+      }
+
       return list.length > 0;
     })
     .sort((a, b) => a.localeCompare(b, "th"));
 
   if (!teams.length) {
-    wrap.innerHTML = `<div class="muted">ไม่มีข้อมูลสำหรับเมตริก "${getMetricDisplayName(state.activeMetric)}"</div>`;
+    const noDataMessage =
+      state.activeMetric === "conversion"
+        ? `ไม่มีข้อมูลสำหรับเมตริก "${getMetricDisplayName(state.activeMetric)}"<br><small>ต้องการทั้งยอดขายและใบเสนอราคา (> 0)</small>`
+        : `ไม่มีข้อมูลสำหรับเมตริก "${getMetricDisplayName(state.activeMetric)}"`;
+
+    wrap.innerHTML = `<div class="muted" style="text-align: center; padding: 20px; line-height: 1.5;">${noDataMessage}</div>`;
     return;
   }
+
+  console.log(
+    `📊 Rendering Top 5: ${getMetricDisplayName(state.activeMetric)}`,
+    {
+      teams: teams,
+      activeMetric: state.activeMetric,
+    },
+  );
 
   // แสดงข้อมูลตามทีม
   teams.forEach((team) => {
     const t = topByTeam[team] || {};
-
-    // ✅ ใช้ state.activeMetric ในการเลือกข้อมูลที่จะแสดง
     const metricKey = getMetricKey(state.activeMetric);
-    const list = t[metricKey] || [];
+
+    let list = t[metricKey] || [];
     const title = `Top 5: ${getMetricDisplayName(state.activeMetric)}`;
 
     console.log(
@@ -3814,52 +4893,445 @@ function renderTop5WithData(wrap, topByTeam) {
       "items",
     );
 
+    // สำหรับ conversion: เรียงลำดับและกรองใหม่
+    if (state.activeMetric === "conversion") {
+      list = list
+        .filter((item) => {
+          const quotes = Number(item.quotes || 0);
+          const sales = Number(item.sales || 0);
+          return quotes > 0 && sales > 0;
+        })
+        .map((item) => {
+          const sales = Number(item.sales || 0);
+          const quotes = Number(item.quotes || 0);
+
+          // คำนวณ conversion rate ด้วยวิธีที่ปลอดภัย
+          const conversionRate = calculateConversionRate(sales, quotes);
+
+          // ประมาณการจำนวนดีลจากยอดขาย
+          const AVERAGE_DEAL_SIZE = 50000;
+          const estimatedDeals = Math.max(
+            1,
+            Math.round(sales / AVERAGE_DEAL_SIZE),
+          );
+
+          return {
+            ...item,
+            conversionRate: conversionRate,
+            estimatedDeals: estimatedDeals,
+            _sales: sales,
+            _quotes: quotes,
+          };
+        })
+        .filter((item) => item.conversionRate > 0 && item.conversionRate <= 100)
+        .sort((a, b) => b.conversionRate - a.conversionRate)
+        .slice(0, 5);
+    } else {
+      // เรียงลำดับตามเมตริกอื่นๆ
+      list = list
+        .slice(0, 10) // เอาข้อมูลมาเยอะหน่อยเพื่อเรียงลำดับ
+        .filter((item) => {
+          const val = Number(item[state.activeMetric] || 0);
+          return val > 0;
+        })
+        .sort((a, b) => {
+          const aVal = Number(a[state.activeMetric] || 0);
+          const bVal = Number(b[state.activeMetric] || 0);
+          return bVal - aVal;
+        })
+        .slice(0, 5);
+    }
+
     const card = document.createElement("div");
     card.className = "tcard";
-    card.innerHTML = `<div class="tcardHead"><h4>${escapeHtml(team)}</h4><div class="mini">${title}</div></div>`;
+    card.innerHTML = `
+      <div class="tcardHead">
+        <h4>${escapeHtml(team)}</h4>
+        <div class="mini">${title}</div>
+        ${
+          state.activeMetric === "conversion"
+            ? '<div class="hint">(ประมาณการจากยอดขาย ÷ ใบเสนอราคา)</div>'
+            : ""
+        }
+      </div>
+    `;
 
     if (!list.length) {
-      card.innerHTML += `<div class="muted" style="margin-top:8px;">ไม่มีข้อมูลสำหรับเมตริกนี้</div>`;
+      const emptyMessage =
+        state.activeMetric === "conversion"
+          ? "ไม่มีข้อมูลที่คำนวณ Conversion Rate ได้<br><small>ต้องการทั้งยอดขายและใบเสนอราคา (> 0)</small>"
+          : "ไม่มีข้อมูลสำหรับเมตริกนี้";
+      card.innerHTML += `<div class="muted" style="margin-top:8px; padding: 10px; line-height: 1.4;">${emptyMessage}</div>`;
     } else {
       list.forEach((row, idx) => {
         let val = 0;
         let displayVal = "";
+        let tooltipText = "";
+        let isEstimated = false;
 
         switch (state.activeMetric) {
           case "sales":
-            val = row.sales || 0;
+            val = Number(row.sales || 0);
             displayVal = formatValue(state.activeMetric, val);
+            tooltipText = `ยอดขาย: ${fmt.format(val)} ฿`;
             break;
+
           case "calls":
-            val = row.calls || 0;
+            val = Number(row.calls || 0);
             displayVal = formatValue(state.activeMetric, val);
+            tooltipText = `การโทร: ${fmt.format(val)} ครั้ง`;
             break;
+
           case "visits":
-            val = row.visits || 0;
+            val = Number(row.visits || 0);
             displayVal = formatValue(state.activeMetric, val);
+            tooltipText = `เข้าพบลูกค้า: ${fmt.format(val)} ครั้ง`;
             break;
+
           case "quotes":
-            val = row.quotes || 0;
+            val = Number(row.quotes || 0);
             displayVal = formatValue(state.activeMetric, val);
+            tooltipText = `ใบเสนอราคา: ${fmt.format(val)} ใบ`;
             break;
+
           case "conversion":
-            val = row.conversionRate || 0;
-            displayVal = formatValue(state.activeMetric, val);
+            // ใช้ค่า conversionRate ที่คำนวณแล้ว
+            val = Number(row.conversionRate || 0);
+            displayVal = formatValue(state.activeMetric, val, row);
+            isEstimated = true;
+
+            // สร้าง tooltip ที่มีรายละเอียดการคำนวณ
+            const sales = Number(row._sales || row.sales || 0);
+            const quotes = Number(row._quotes || row.quotes || 0);
+            const estimatedDeals =
+              row.estimatedDeals || Math.max(1, Math.round(sales / 50000));
+
+            tooltipText = `
+              <div style="text-align: left; min-width: 200px;">
+                <strong>Conversion Rate: ${val.toFixed(1)}%</strong><br>
+                <div style="margin-top: 5px;">
+                  <small>ยอดขาย: ${fmt.format(sales)} ฿</small><br>
+                  <small>ใบเสนอราคา: ${fmt.format(quotes)} ใบ</small><br>
+                  <small>ประมาณการดีลที่ปิดได้: ${estimatedDeals} ดีล</small><br>
+                  <small>สูตร: (${estimatedDeals} ÷ ${fmt.format(quotes)}) × 100</small>
+                </div>
+                <div style="margin-top: 5px; padding-top: 5px; border-top: 1px solid rgba(255,255,255,0.1);">
+                  <small><em>*ประมาณการจากยอดขาย (สมมติ average deal = 50,000 ฿)</em></small>
+                </div>
+              </div>
+            `;
             break;
         }
 
+        // กำหนด class พิเศษสำหรับอันดับ 1-3
+        let rankClass = "";
+        if (idx === 0) rankClass = "rank-1";
+        else if (idx === 1) rankClass = "rank-2";
+        else if (idx === 2) rankClass = "rank-3";
+
         const div = document.createElement("div");
-        div.className = "trow";
-        div.innerHTML =
-          `<div class="rank">${idx + 1}</div>` +
-          `<div class="name">${escapeHtml(row.person || "ไม่ระบุชื่อ")}</div>` +
-          `<div class="val">${displayVal}</div>`;
+        div.className = `trow ${rankClass}`;
+
+        // ใช้ data attribute สำหรับ tooltip ที่ซับซ้อน
+        if (tooltipText) {
+          div.setAttribute(
+            "data-tooltip",
+            tooltipText.replace(/\n/g, " ").trim(),
+          );
+        }
+
+        // สร้าง content
+        const nameContent = escapeHtml(row.person || "ไม่ระบุชื่อ");
+        const metaContent =
+          state.activeMetric === "conversion" && row._quotes
+            ? `<span class="meta">(${fmt.format(row._quotes)} quotes)</span>`
+            : "";
+
+        const progressBar =
+          state.activeMetric === "conversion" && val > 0
+            ? `<div class="progress">
+              <div class="progress-bar" style="width: ${Math.min(val, 100)}%"></div>
+            </div>`
+            : "";
+
+        const estimatedBadge = isEstimated
+          ? `<span class="estimated-badge" title="ประมาณการ">~</span>`
+          : "";
+
+        div.innerHTML = `
+          <div class="rank">${idx + 1}</div>
+          <div class="name">
+            ${nameContent}
+            ${metaContent}
+          </div>
+          <div class="val ${state.activeMetric}">
+            ${estimatedBadge}
+            ${displayVal}
+            ${progressBar}
+          </div>
+        `;
+
+        // เพิ่ม event listener สำหรับ tooltip
+        div.addEventListener("mouseenter", function (e) {
+          if (tooltipText) {
+            showCustomTooltip(e, tooltipText);
+          }
+        });
+
+        div.addEventListener("mouseleave", function () {
+          hideCustomTooltip();
+        });
+
         card.appendChild(div);
       });
+
+      // เพิ่มข้อมูลสรุปสำหรับ conversion rate
+      if (state.activeMetric === "conversion" && list.length > 0) {
+        const avgConversion =
+          list.reduce(
+            (sum, item) => sum + (Number(item.conversionRate) || 0),
+            0,
+          ) / list.length;
+
+        const totalSales = list.reduce(
+          (sum, item) => sum + (Number(item._sales || item.sales) || 0),
+          0,
+        );
+        const totalQuotes = list.reduce(
+          (sum, item) => sum + (Number(item._quotes || item.quotes) || 0),
+          0,
+        );
+        const totalEstimatedDeals = list.reduce(
+          (sum, item) => sum + (Number(item.estimatedDeals) || 0),
+          0,
+        );
+
+        const summaryDiv = document.createElement("div");
+        summaryDiv.className = "summary";
+        summaryDiv.innerHTML = `
+          <div class="summary-row">
+            <span>ค่าเฉลี่ย:</span>
+            <span class="avg-conversion">${avgConversion.toFixed(1)}%</span>
+          </div>
+          <div class="summary-row">
+            <span>ยอดขายรวม:</span>
+            <span>${fmt.format(totalSales)} ฿</span>
+          </div>
+          <div class="summary-row">
+            <span>ใบเสนอราคารวม:</span>
+            <span>${fmt.format(totalQuotes)} ใบ</span>
+          </div>
+          <div class="summary-note">
+            <small>*ประมาณการจากยอดขาย (สมมติ average deal = 50,000 ฿)</small>
+          </div>
+        `;
+        card.appendChild(summaryDiv);
+      }
     }
 
     wrap.appendChild(card);
   });
+
+  // เพิ่ม CSS สำหรับการแสดงผล
+  if (!document.getElementById("top5-custom-styles")) {
+    const style = document.createElement("style");
+    style.id = "top5-custom-styles";
+    style.textContent = `
+      .trow .val.conversion {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 2px;
+      }
+      .trow .progress {
+        width: 80px;
+        height: 6px;
+        background: rgba(255,255,255,0.1);
+        border-radius: 3px;
+        overflow: hidden;
+        margin-top: 2px;
+      }
+      .trow .progress-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #3b82f6, #22c55e);
+        transition: width 0.3s ease;
+        border-radius: 3px;
+      }
+      .trow .name .meta {
+        font-size: 10px;
+        color: #94a3b8;
+        margin-left: 4px;
+        font-weight: normal;
+      }
+      .trow.rank-1 .val {
+        color: #fbbf24;
+        font-weight: 700;
+      }
+      .trow.rank-2 .val {
+        color: #94a3b8;
+        font-weight: 600;
+      }
+      .trow.rank-3 .val {
+        color: #d1d5db;
+        font-weight: 500;
+      }
+      .trow .estimated-badge {
+        color: #f59e0b;
+        font-weight: bold;
+        margin-right: 2px;
+        font-size: 0.9em;
+      }
+      .summary {
+        margin-top: 12px;
+        padding: 10px;
+        background: rgba(255,255,255,0.03);
+        border-radius: 6px;
+        font-size: 12px;
+        border: 1px solid rgba(255,255,255,0.05);
+      }
+      .summary-row {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 6px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid rgba(255,255,255,0.05);
+      }
+      .summary-row:last-child {
+        margin-bottom: 0;
+        padding-bottom: 0;
+        border-bottom: none;
+      }
+      .avg-conversion {
+        color: #22c55e;
+        font-weight: 600;
+      }
+      .summary-note {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid rgba(255,255,255,0.05);
+        color: #94a3b8;
+        font-size: 11px;
+        line-height: 1.3;
+      }
+      .hint {
+        font-size: 11px;
+        color: #94a3b8;
+        margin-top: 2px;
+        line-height: 1.3;
+      }
+      .custom-tooltip {
+        position: fixed;
+        background: rgba(15, 23, 42, 0.95);
+        color: white;
+        padding: 12px;
+        border-radius: 6px;
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        z-index: 10000;
+        max-width: 300px;
+        font-size: 13px;
+        line-height: 1.4;
+        backdrop-filter: blur(10px);
+        pointer-events: none;
+      }
+      .custom-tooltip small {
+        color: #cbd5e1;
+        opacity: 0.9;
+      }
+      .custom-tooltip em {
+        color: #fbbf24;
+        font-style: normal;
+      }
+    `;
+    document.head.appendChild(style);
+  }
+}
+
+// Helper functions สำหรับ custom tooltip
+let customTooltip = null;
+let tooltipTimeout = null;
+
+function showCustomTooltip(event, content) {
+  if (tooltipTimeout) {
+    clearTimeout(tooltipTimeout);
+  }
+
+  tooltipTimeout = setTimeout(() => {
+    if (!customTooltip) {
+      customTooltip = document.createElement("div");
+      customTooltip.className = "custom-tooltip";
+      document.body.appendChild(customTooltip);
+    }
+
+    customTooltip.innerHTML = content;
+    customTooltip.style.display = "block";
+
+    // Position tooltip
+    const x = event.clientX + 10;
+    const y = event.clientY + 10;
+
+    customTooltip.style.left = `${x}px`;
+    customTooltip.style.top = `${y}px`;
+
+    // ตรวจสอบไม่ให้ tooltip ออกนอกหน้าจอ
+    const rect = customTooltip.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      customTooltip.style.left = `${event.clientX - rect.width - 10}px`;
+    }
+    if (rect.bottom > window.innerHeight) {
+      customTooltip.style.top = `${event.clientY - rect.height - 10}px`;
+    }
+  }, 300); // delay 300ms
+}
+
+function hideCustomTooltip() {
+  if (tooltipTimeout) {
+    clearTimeout(tooltipTimeout);
+  }
+
+  if (customTooltip) {
+    customTooltip.style.display = "none";
+  }
+}
+
+// ปิด tooltip เมื่อคลิกที่อื่น
+document.addEventListener("click", hideCustomTooltip);
+
+// Helper function สำหรับการแสดงชื่อเมตริก
+function getMetricDisplayName(metric) {
+  switch (metric) {
+    case "sales":
+      return "ยอดขาย";
+    case "calls":
+      return "การโทร";
+    case "visits":
+      return "เข้าพบลูกค้า";
+    case "quotes":
+      return "ใบเสนอราคา";
+    case "conversion":
+      return "อัตราการปิดการขาย";
+    default:
+      return "ยอดขาย";
+  }
+}
+
+// Helper function สำหรับการแปลงเมตริกเป็น key
+function getMetricKey(metric) {
+  switch (metric) {
+    case "sales":
+      return "topSales";
+    case "calls":
+      return "topCalls";
+    case "visits":
+      return "topVisits";
+    case "quotes":
+      return "topQuotes";
+    case "conversion":
+      return "topConversion";
+    default:
+      return "topSales";
+  }
 }
 
 // ✅ HELPER FUNCTION: แปลงเมตริกเป็น key ใน topByTeam object
@@ -3896,6 +5368,40 @@ function getMetricDisplayName(metric) {
     default:
       return "ยอดขาย";
   }
+}
+
+function calculateConversionRate(
+  salesAmount,
+  quotesCount,
+  actualSalesCount = null,
+) {
+  const salesNum = Number(salesAmount || 0);
+  const quotesNum = Number(quotesCount || 0);
+
+  // ถ้าใช้ actualSalesCount (จำนวนยอดขายที่ปิดได้จริง)
+  if (actualSalesCount !== null && actualSalesCount !== undefined) {
+    const actualSales = Number(actualSalesCount || 0);
+    if (quotesNum <= 0) return 0;
+    if (actualSales <= 0) return 0;
+    return Math.min(100, (actualSales / quotesNum) * 100);
+  }
+
+  // ถ้าไม่มี actualSalesCount ให้ตรวจสอบหน่วย
+  if (salesNum <= 0 || quotesNum <= 0) return 0;
+
+  // ตรวจสอบว่า salesNum น่าจะเป็นจำนวนเงินหรือจำนวนใบ
+  // ถ้า salesNum ใหญ่กว่า quotesNum มาก แสดงว่าเป็นจำนวนเงิน
+  if (salesNum > quotesNum * 10000) {
+    // สมมติ average deal size ~ 10,000
+    console.warn(
+      `⚠️ Sales amount (${fmt.format(salesNum)}) > Quotes count (${quotesNum}) - หน่วยไม่ตรงกัน`,
+    );
+    return 0; // หรือ return null เพื่อระบุว่าไม่สามารถคำนวณได้
+  }
+
+  // ถ้าจำนวนสมเหตุสมผล ให้คำนวณ
+  const rate = (salesNum / quotesNum) * 100;
+  return Math.min(100, rate);
 }
 
 function renderTopPerformers(payload) {
@@ -3951,43 +5457,30 @@ function validatePayload(payload) {
   const errors = [];
   const warnings = [];
 
-  // ตรวจสอบโครงสร้างพื้นฐาน
   if (!payload) {
     errors.push("Payload is null or undefined");
   } else if (!payload.ok) {
     errors.push(`Payload.ok is false: ${payload.error || "No error message"}`);
   }
 
-  // ตรวจสอบ dailyTrend
   if (!Array.isArray(payload.dailyTrend)) {
-    errors.push("dailyTrend is not an array");
+    warnings.push("dailyTrend is not an array");
   } else if (payload.dailyTrend.length === 0) {
     warnings.push("dailyTrend is empty");
-  } else {
-    // ตรวจสอบแต่ละ entry
-    payload.dailyTrend.forEach((item, index) => {
-      if (!item.date) {
-        warnings.push(`dailyTrend[${index}] has no date`);
-      }
-      if (typeof item.sales !== "number") {
-        warnings.push(
-          `dailyTrend[${index}] sales is not a number: ${item.sales}`,
-        );
-      }
-    });
   }
 
-  // ตรวจสอบ summary
   if (!Array.isArray(payload.summary)) {
     warnings.push("summary is not an array");
+  } else if (payload.summary.length === 0) {
+    warnings.push("summary is empty");
   }
 
-  // ตรวจสอบ personTotals
   if (!Array.isArray(payload.personTotals)) {
     warnings.push("personTotals is not an array");
+  } else if (payload.personTotals.length === 0) {
+    warnings.push("personTotals is empty");
   }
 
-  // ตรวจสอบ kpiToday
   if (!payload.kpiToday || typeof payload.kpiToday !== "object") {
     warnings.push("kpiToday is missing or not an object");
   }
@@ -4002,10 +5495,11 @@ function validatePayload(payload) {
     console.warn("Validation Warnings:", warnings);
   }
 
-  if (errors.length === 0 && warnings.length === 0) {
-    console.log("✓ Payload validation passed");
-  }
-
+  console.log("✓ Validation complete", {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+  });
   console.groupEnd();
 
   return {
@@ -4016,34 +5510,98 @@ function validatePayload(payload) {
 }
 
 function debugDataStructure(payload) {
-  console.group("🔍 Data Structure Analysis");
+  console.group("🔍 Data Structure Debug");
 
-  // ตรวจสอบ dailyTrend
   if (payload.dailyTrend && payload.dailyTrend.length > 0) {
     const sample = payload.dailyTrend[0];
-    console.log("📅 dailyTrend keys:", Object.keys(sample));
-    console.log("Sample data:", {
+    console.log("📅 dailyTrend sample:", {
       date: sample.date,
       sales: sample.sales,
       calls: sample.calls,
       visits: sample.visits,
       quotes: sample.quotes,
     });
+    console.log(`📅 dailyTrend total rows: ${payload.dailyTrend.length}`);
   }
 
-  // ตรวจสอบ summary
   if (payload.summary && payload.summary.length > 0) {
-    console.log("🏢 summary keys:", Object.keys(payload.summary[0]));
+    console.log("🏢 summary sample:", payload.summary[0]);
   }
 
-  // ตรวจสอบ personTotals
   if (payload.personTotals && payload.personTotals.length > 0) {
-    console.log("👤 personTotals keys:", Object.keys(payload.personTotals[0]));
+    console.log("👤 personTotals sample:", payload.personTotals[0]);
+    console.log(`👤 personTotals total rows: ${payload.personTotals.length}`);
   }
 
-  // ตรวจสอบ target
-  if (payload.target) {
-    console.log("🎯 target:", payload.target);
+  if (payload.kpiToday) {
+    console.log("📊 kpiToday:", payload.kpiToday);
+  }
+
+  if (payload.callVisitYearly) {
+    console.log("📞 callVisitYearly:", payload.callVisitYearly);
+  }
+
+  if (payload.customerSegmentation) {
+    console.log("👥 customerSegmentation:", payload.customerSegmentation);
+  }
+
+  console.groupEnd();
+}
+
+function checkAPIData(payload) {
+  console.group("📊 API Data Check");
+
+  // Check dailyTrend totals
+  if (payload.dailyTrend && payload.dailyTrend.length > 0) {
+    const totalCalls = payload.dailyTrend.reduce(
+      (sum, day) => sum + (day.calls || 0),
+      0,
+    );
+    const totalVisits = payload.dailyTrend.reduce(
+      (sum, day) => sum + (day.visits || 0),
+      0,
+    );
+    const totalSales = payload.dailyTrend.reduce(
+      (sum, day) => sum + (day.sales || 0),
+      0,
+    );
+    const totalQuotes = payload.dailyTrend.reduce(
+      (sum, day) => sum + (day.quotes || 0),
+      0,
+    );
+
+    console.log("📈 Daily Trend Totals:", {
+      calls: totalCalls,
+      visits: totalVisits,
+      sales: fmt.format(totalSales),
+      quotes: totalQuotes,
+      days: payload.dailyTrend.length,
+    });
+  }
+
+  // Check summary totals
+  if (payload.summary && payload.summary.length > 0) {
+    const totalSales = payload.summary.reduce(
+      (sum, team) => sum + (team.sales || 0),
+      0,
+    );
+    console.log("🏢 Summary Totals:", {
+      teams: payload.summary.length,
+      totalSales: fmt.format(totalSales),
+    });
+  }
+
+  // Check person totals
+  if (payload.personTotals && payload.personTotals.length > 0) {
+    const topPerson = payload.personTotals.reduce(
+      (max, person) => ((person.sales || 0) > (max.sales || 0) ? person : max),
+      { sales: 0 },
+    );
+
+    console.log("👑 Top Person:", {
+      name: topPerson.person || topPerson.name,
+      sales: fmt.format(topPerson.sales || 0),
+    });
   }
 
   console.groupEnd();
@@ -4102,172 +5660,44 @@ function checkAPIData(payload) {
   console.groupEnd();
 }
 
-async function loadData(isAuto = false) {
-  // ✅ ป้องกันการโหลดซ้ำซ้อน
-  if (isAuto && state.isPicking) {
-    console.log("⏸️ Skipping auto load (user is picking)");
-    return;
-  }
-
-  if (state.isLoading) {
-    console.log("⏸️ Skipping load (already loading)");
-    return;
-  }
-
-  state.isLoading = true;
-  const startTime = Date.now();
-
-  setFilterStatus("กำลังโหลด…");
-
-  const btnApply = el("btnApply");
-  const originalText = btnApply?.textContent;
-  if (btnApply) btnApply.textContent = "Loading...";
-
-  try {
-    const qs = buildQueryFromFilters();
-    const url = API_URL + "?" + qs.toString();
-    console.log(
-      `📡 [${new Date().toLocaleTimeString()}] Loading from URL:`,
-      url,
-    );
-
-    // ✅ ใช้ timeout ที่แตกต่างกันสำหรับ auto load
-    const timeout = isAuto ? 15000 : 30000; // auto: 15s, manual: 30s
-
-    const payload = await loadJSONP(url, {
-      timeout: timeout,
-      isRetry: state.retryCount > 0,
-    });
-
-    const loadTime = Date.now() - startTime;
-    console.log(`✅ Load successful in ${loadTime}ms`);
-
-    if (!payload) {
-      throw new Error("Empty response from server");
-    }
-
-    console.log("✅ Payload received");
-    console.log("- Payload keys:", Object.keys(payload));
-    console.log("- Payload.ok:", payload.ok);
-    console.log("- has topByTeam:", !!payload.topByTeam);
-
-    // ✅ Validation
-    const validation = validatePayload(payload);
-    if (!validation.isValid) {
-      throw new Error(validation.errors[0] || "Invalid payload structure");
-    }
-
-    // ✅ Reset state
-    state.lastPayload = payload;
-    state.retryCount = 0;
-
-    // ✅ Update UI
-    updateAllUI(payload);
-
-    // ✅ Cache to localStorage
-    try {
-      const cacheData = {
-        data: payload,
-        timestamp: Date.now(),
-        filters: qs.toString(),
-        loadTime: loadTime,
-      };
-      localStorage.setItem("lastDashboardPayload", JSON.stringify(cacheData));
-      console.log("💾 Cached to localStorage");
-    } catch (e) {
-      console.warn("⚠️ Could not save to localStorage:", e.message);
-    }
-
-    setFilterStatus("พร้อมใช้งาน");
-    if (!isAuto) {
-      showToast(`โหลดข้อมูลสำเร็จ (${loadTime}ms)`, "success");
-    }
-  } catch (err) {
-    const errorTime = Date.now() - startTime;
-    console.error(`❌ API load error (${errorTime}ms):`, err);
-
-    let errorMessage = err.message || "Unknown error";
-    let userMessage = errorMessage;
-
-    // ✅ แปลง error messages เป็นภาษาไทย
-    if (errorMessage.includes("timeout")) {
-      userMessage = "คำขอหมดเวลา (เซิร์ฟเวอร์ตอบสนองช้า)";
-    } else if (errorMessage.includes("Failed to load script")) {
-      userMessage = "ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้";
-    } else if (errorMessage.includes("Empty response")) {
-      userMessage = "เซิร์ฟเวอร์ไม่ตอบสนอง";
-    } else if (errorMessage.includes("Network Error")) {
-      userMessage = "ข้อผิดพลาดเครือข่าย";
-    }
-
-    // ✅ Update UI error state
-    setText("chartStatus", `ข้อผิดพลาด: ${userMessage}`);
-    setFilterStatus("โหลดไม่สำเร็จ", true);
-
-    // ✅ ลองใช้ cached data ถ้ามี
-    try {
-      const cached = localStorage.getItem("lastDashboardPayload");
-      if (cached) {
-        const cachedData = JSON.parse(cached);
-        const cacheAge = Date.now() - cachedData.timestamp;
-        const cacheValid = cacheAge < 3600000; // 1 ชั่วโมง
-
-        if (cacheValid) {
-          console.log(
-            "🔄 Using cached data from localStorage (age:",
-            Math.round(cacheAge / 1000),
-            "s)",
-          );
-          showToast("ใช้ข้อมูลจากแคช (ออฟไลน์)", "info");
-          updateAllUI(cachedData.data);
-          setFilterStatus("ใช้ข้อมูลแคช");
-          state.retryCount = 0;
-          return;
-        }
-      }
-    } catch (cacheErr) {
-      console.warn("Cache fallback failed:", cacheErr);
-    }
-
-    // ✅ Retry logic (เฉพาะสำหรับ manual load หรือ retry count น้อย)
-    if (!isAuto && state.retryCount < MAX_RETRIES) {
-      state.retryCount++;
-      const retryDelay = RETRY_DELAY * Math.pow(1.5, state.retryCount - 1);
-
-      const retryMessage = `กำลังลองใหม่... (${state.retryCount}/${MAX_RETRIES})`;
-      console.log(
-        `🔁 Retry ${state.retryCount}/${MAX_RETRIES} in ${retryDelay}ms`,
-      );
-
-      showToast(retryMessage, "info");
-      setFilterStatus(retryMessage);
-
-      // ✅ ใช้ setTimeout สำหรับ retry
-      setTimeout(() => {
-        console.log(`🔄 Executing retry ${state.retryCount}/${MAX_RETRIES}`);
-        loadData(true); // ใช้ isAuto = true สำหรับ retry
-      }, retryDelay);
-    } else {
-      // ✅ หมด retry หรือเป็น auto load
-      if (state.retryCount >= MAX_RETRIES) {
-        showToast("ลองใหม่หลายครั้งแล้ว ไม่สามารถเชื่อมต่อได้", "error");
-        state.retryCount = 0;
-      }
-
-      // ✅ แสดง fallback UI
-      if (!isAuto) {
-        showFallbackUI();
-      }
-    }
-  } finally {
-    state.isLoading = false;
-    if (btnApply) btnApply.textContent = originalText;
-  }
-}
-
 // ✅ Fallback UI สำหรับเมื่อ API ไม่สามารถติดต่อได้
 function showFallbackUI() {
   console.log("🔄 Showing fallback UI");
+
+  const fallbackHTML = `
+    <div class="offline-message">
+      <div style="color: #fbbf24; font-size: 32px; margin-bottom: 15px; text-align: center;">
+        ⚠️
+      </div>
+      <div style="text-align: center; margin-bottom: 20px;">
+        <div style="color: #94a3b8; font-size: 16px; margin-bottom: 10px;">
+          ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้
+        </div>
+        <div style="font-size: 13px; color: #64748b; line-height: 1.5;">
+          กรุณาตรวจสอบ:
+          <ul style="text-align: left; margin: 10px 0; padding-left: 20px;">
+            <li>การเชื่อมต่ออินเทอร์เน็ต</li>
+            <li>URL ของ API: ${API_URL.substring(0, 50)}...</li>
+            <li>สถานะเซิร์ฟเวอร์</li>
+          </ul>
+        </div>
+      </div>
+      <div style="text-align: center;">
+        <button onclick="location.reload()" 
+                style="padding: 10px 20px; background: #3b82f6; color: white; 
+                       border: none; border-radius: 6px; cursor: pointer; 
+                       font-weight: 500; margin-right: 10px;">
+          โหลดใหม่
+        </button>
+        <button onclick="loadData(false)" 
+                style="padding: 10px 20px; background: #64748b; color: white; 
+                       border: none; border-radius: 6px; cursor: pointer; 
+                       font-weight: 500;">
+          ลองอีกครั้ง
+        </button>
+      </div>
+    </div>
+  `;
 
   // แสดงข้อความใน containers หลัก
   const mainContainers = [
@@ -4277,27 +5707,29 @@ function showFallbackUI() {
     "conversionContainer",
     "areaPerformanceContainer",
     "productPerformanceContainer",
+    "monthlyComparisonContainer",
   ];
 
   mainContainers.forEach((containerId) => {
-    const container = el(containerId);
+    const container = document.getElementById(containerId);
     if (container) {
-      container.innerHTML = `
-        <div class="offline-message">
-          <div style="color: #fbbf24; font-size: 24px; margin-bottom: 10px;">⚠️</div>
-          <div style="color: #94a3b8; margin-bottom: 5px;">ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้</div>
-          <div style="font-size: 12px; color: #64748b;">
-            กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ต
-          </div>
-          <button onclick="location.reload()" style="margin-top: 10px; padding: 6px 12px; background: #3b82f6; color: white; border: none; border-radius: 4px; cursor: pointer;">
-            โหลดใหม่
-          </button>
-        </div>
-      `;
+      container.innerHTML = fallbackHTML;
     }
   });
 
-  // ซ่อน loading indicators
+  // แสดงใน chart area
+  const chartStatus = document.getElementById("chartStatus");
+  if (chartStatus) {
+    chartStatus.innerHTML = `
+      <div style="text-align: center; padding: 30px;">
+        <div style="color: #f59e0b; margin-bottom: 10px;">⚠️ ไม่สามารถโหลดข้อมูลได้</div>
+        <div style="font-size: 13px; color: #94a3b8;">
+          กำลังใช้ข้อมูลแคชหรือลองเชื่อมต่อใหม่...
+        </div>
+      </div>
+    `;
+  }
+
   setFilterStatus("เชื่อมต่อเซิร์ฟเวอร์ไม่สำเร็จ", true);
 }
 
@@ -4336,6 +5768,144 @@ function checkCachedDataOnLoad() {
   }
   return null;
 }
+
+function checkCallVisitHTMLStructure() {
+  console.group("🔍 Call & Visit HTML Structure");
+
+  // ตรวจสอบ container ที่น่าจะใช้
+  const possibleContainers = [
+    "#callVisitContainer",
+    "#callVisitYearlyContainer",
+    ".call-visit-yearly",
+    ".call-visit-analysis",
+    "[data-section='call-visit']",
+    ".cv-container",
+  ];
+
+  possibleContainers.forEach((selector) => {
+    const el = document.querySelector(selector);
+    if (el) {
+      console.log(`Found container: ${selector}`, el);
+
+      // ตรวจสอบ elements ภายใน
+      const innerElements = el.querySelectorAll("*");
+      console.log(
+        `Inner elements (${innerElements.length}):`,
+        Array.from(innerElements).map((e) => ({
+          tag: e.tagName,
+          id: e.id,
+          class: e.className,
+          text: e.textContent.substring(0, 50),
+        })),
+      );
+    }
+  });
+
+  // ตรวจสอบ IDs ที่ฟังก์ชันต้องการ
+  const requiredIds = [
+    "cv_total_calls",
+    "cv_total_visits",
+    "cv_total_presented",
+    "cv_total_quoted",
+    "cv_total_closed",
+  ];
+
+  requiredIds.forEach((id) => {
+    const el = document.getElementById(id);
+    console.log(
+      `${id}:`,
+      el
+        ? {
+            text: el.textContent,
+            parent: el.parentElement?.tagName,
+            parentId: el.parentElement?.id,
+          }
+        : "NOT FOUND",
+    );
+  });
+
+  console.groupEnd();
+}
+
+function ensureCallVisitContainer() {
+  const containerId = "callVisitYearlyContainer";
+  let container = document.getElementById(containerId);
+
+  if (!container) {
+    console.log("🔄 Creating Call & Visit container...");
+
+    container = document.createElement("div");
+    container.id = containerId;
+    container.className = "section call-visit-yearly";
+    container.innerHTML = `
+      <div class="section-header">
+        <h3>Call & Visit Analysis (Yearly)</h3>
+        <div class="section-subtitle">ข้อมูลประจำปี</div>
+      </div>
+      
+      <div class="cv-grid">
+        <div class="cv-card">
+          <div class="cv-label">การโทรทั้งหมด</div>
+          <div class="cv-value" id="cv_total_calls">0</div>
+          <div class="cv-unit">ครั้ง</div>
+        </div>
+        
+        <div class="cv-card">
+          <div class="cv-label">เข้าพบทั้งหมด</div>
+          <div class="cv-value" id="cv_total_visits">0</div>
+          <div class="cv-unit">ครั้ง</div>
+        </div>
+        
+        <div class="cv-card highlight">
+          <div class="cv-label">Presented</div>
+          <div class="cv-value" id="cv_total_presented">0</div>
+          <div class="cv-unit">ราย</div>
+        </div>
+        
+        <div class="cv-card">
+          <div class="cv-label">Quoted</div>
+          <div class="cv-value" id="cv_total_quoted">0</div>
+          <div class="cv-unit">ใบ</div>
+        </div>
+        
+        <div class="cv-card success">
+          <div class="cv-label">Closed</div>
+          <div class="cv-value" id="cv_total_closed">0</div>
+          <div class="cv-unit">ใบ</div>
+        </div>
+      </div>
+    `;
+
+    // หาที่วาง container
+    const targetSelectors = [
+      "#productPerformanceContainer",
+      "#areaPerformanceContainer",
+      "#conversionContainer",
+      ".main-grid > div:last-child",
+      "body",
+    ];
+
+    for (const selector of targetSelectors) {
+      const target = document.querySelector(selector);
+      if (target) {
+        if (selector === "body") {
+          target.appendChild(container);
+        } else {
+          target.parentNode.insertBefore(container, target.nextSibling);
+        }
+        console.log(`✅ Container inserted after: ${selector}`);
+        break;
+      }
+    }
+  }
+
+  return container;
+}
+
+// เรียกใช้ใน onload
+window.addEventListener("load", () => {
+  setTimeout(checkCallVisitHTMLStructure, 1000);
+});
 
 // ✅ แก้ไข loadJSONP ให้มี error handling ที่ดีขึ้น
 async function loadJSONP(url) {
@@ -4602,52 +6172,6 @@ async function quickAPITest() {
     return true;
   } catch (err) {
     console.log("🔍 Quick test failed:", err.message);
-    return false;
-  }
-}
-
-// ✅ ใช้ใน checkAPIStatus
-async function checkAPIStatus() {
-  try {
-    console.log("🔍 Starting API status check");
-
-    // ลอง quick test ก่อน
-    const quickTest = await quickAPITest();
-    if (!quickTest) {
-      console.warn("⚠️ Quick test failed");
-      return false;
-    }
-
-    // แล้วค่อยทำ full test
-    const testUrl = API_URL + "?days=1";
-    console.log("🔍 Full API test:", testUrl);
-
-    const payload = await loadJSONP(testUrl, { timeout: 10000 });
-
-    if (!payload) {
-      console.warn("⚠️ API returned empty response");
-      return false;
-    }
-
-    if (!payload.ok) {
-      console.warn(
-        "⚠️ API response not ok:",
-        payload.error || "No error message",
-      );
-      return false;
-    }
-
-    console.log("✅ API status check passed");
-    return true;
-  } catch (err) {
-    console.warn("⚠️ API status check failed:", err.message);
-
-    // ✅ แสดงคำแนะนำ
-    console.log("💡 Debug tips:");
-    console.log("1. เปิด URL ใน browser:", API_URL + "?days=1");
-    console.log("2. ตรวจสอบ Google Apps Script deployment");
-    console.log("3. ตรวจสอบ internet connection");
-
     return false;
   }
 }
